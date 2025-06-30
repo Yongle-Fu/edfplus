@@ -6,9 +6,7 @@ fn main() -> Result<()> {
     
     // 尝试读取一个EDF文件（如果存在的话）
     let test_files = [
-        "test.edf",
-        "../test_data/sample.edf",
-        "/tmp/test.edf"
+        "test_data/test_generated.edf",
     ];
     
     for file_path in &test_files {
