@@ -78,17 +78,27 @@ fn main() -> Result<()> {
     let read_start = Instant::now();
     
     let mut reader = EdfReader::open(file_path)?;
-    let header = reader.header().clone();
+    let signals_info = {
+        let header = reader.header();
+        (
+            header.signals.len(),
+            header.signals[0].samples_in_file,
+            header.file_duration,
+            header.signals.clone()
+        )
+    };
+    
+    let (signals_len, total_samples, file_duration, signals) = signals_info;
     
     println!("文件信息:");
-    println!("  信号数: {}", header.signals.len());
-    println!("  总样本数: {}", header.signals[0].samples_in_file);
-    println!("  文件时长: {:.2} 秒", header.file_duration as f64 / 10_000_000.0);
+    println!("  信号数: {}", signals_len);
+    println!("  总样本数: {}", total_samples);
+    println!("  文件时长: {:.2} 秒", file_duration as f64 / 10_000_000.0);
     
     // 读取所有数据
     let mut total_samples_read = 0;
-    for signal_idx in 0..header.signals.len() {
-        let signal = &header.signals[signal_idx];
+    for signal_idx in 0..signals.len() {
+        let signal = &signals[signal_idx];
         let samples_to_read = signal.samples_in_file as usize;
         
         reader.rewind(signal_idx)?;
@@ -115,11 +125,11 @@ fn main() -> Result<()> {
     let seek_start = Instant::now();
     
     let signal_idx = 0;
-    let signal = &header.signals[signal_idx];
+    let samples_in_file = signals[signal_idx].samples_in_file; // Use the cloned signals info
     let num_seeks = 100;
     
     for i in 0..num_seeks {
-        let position = (i * signal.samples_in_file as usize / num_seeks) as i64;
+        let position = (i * samples_in_file as usize / num_seeks) as i64;
         reader.seek(signal_idx, position)?;
         let samples = reader.read_physical_samples(signal_idx, 10)?;
         

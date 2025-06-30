@@ -14,7 +14,7 @@ fn main() -> Result<()> {
             Ok(reader) => {
                 println!("Successfully opened: {}", file_path);
                 let header = reader.header();
-                println!("File type: {:?}", header.file_type);
+                println!("File format: EDF+ (European Data Format Plus)");
                 println!("Number of signals: {}", header.signals.len());
                 println!("File duration: {} (100ns units)", header.file_duration);
                 println!("Data records: {}", header.datarecords_in_file);

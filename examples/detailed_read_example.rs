@@ -12,34 +12,55 @@ fn main() -> Result<()> {
         Ok(mut reader) => {
             println!("✅ 成功打开文件: {}", file_path);
             
-            // 克隆头部信息以避免借用冲突
-            let header = reader.header().clone();
+            // 获取头部信息的拷贝用于显示
+            let header_info = {
+                let header = reader.header();
+                (
+                    header.signals.len(),
+                    header.file_duration,
+                    header.datarecords_in_file,
+                    header.datarecord_duration,
+                    header.patient_code.clone(),
+                    header.sex.clone(),
+                    header.birthdate.clone(),
+                    header.patient_name.clone(),
+                    header.start_date,
+                    header.start_time,
+                    header.equipment.clone(),
+                    header.technician.clone(),
+                    header.signals.clone(), // 克隆整个信号列表
+                )
+            };
+            
+            let (signals_len, file_duration, datarecords_in_file, datarecord_duration,
+                 patient_code, sex, birthdate, patient_name, start_date, start_time,
+                 equipment, technician, signals) = header_info;
             
             // 显示文件基本信息
             println!("\n📊 文件信息:");
-            println!("  文件类型: {:?}", header.file_type);
-            println!("  信号数量: {}", header.signals.len());
-            println!("  文件时长: {:.2} 秒", header.file_duration as f64 / 10_000_000.0);
-            println!("  数据记录数: {}", header.datarecords_in_file);
-            println!("  记录时长: {:.3} 秒", header.datarecord_duration as f64 / 10_000_000.0);
+            println!("  文件格式: EDF+ (European Data Format Plus)");
+            println!("  信号数量: {}", signals_len);
+            println!("  文件时长: {:.2} 秒", file_duration as f64 / 10_000_000.0);
+            println!("  数据记录数: {}", datarecords_in_file);
+            println!("  记录时长: {:.3} 秒", datarecord_duration as f64 / 10_000_000.0);
             
             // 显示患者信息
             println!("\n👤 患者信息:");
-            println!("  患者代码: {}", header.patient_code);
-            println!("  性别: {}", header.sex);
-            println!("  出生日期: {}", header.birthdate);
-            println!("  患者姓名: {}", header.patient_name);
+            println!("  患者代码: {}", patient_code);
+            println!("  性别: {}", sex);
+            println!("  出生日期: {}", birthdate);
+            println!("  患者姓名: {}", patient_name);
             
             // 显示记录信息
             println!("\n🏥 记录信息:");
-            println!("  开始日期: {}", header.start_date);
-            println!("  开始时间: {}", header.start_time);
-            println!("  设备: {}", header.equipment);
-            println!("  技术员: {}", header.technician);
+            println!("  开始日期: {}", start_date);
+            println!("  开始时间: {}", start_time);
+            println!("  设备: {}", equipment);
+            println!("  技术员: {}", technician);
             
             // 显示每个信号的详细信息
             println!("\n📈 信号信息:");
-            for (i, signal) in header.signals.iter().enumerate() {
+            for (i, signal) in signals.iter().enumerate() {
                 println!("  信号 {}: {}", i, signal.label);
                 println!("    物理范围: {:.2} - {:.2} {}", 
                     signal.physical_min, signal.physical_max, signal.physical_dimension);
@@ -54,7 +75,8 @@ fn main() -> Result<()> {
             
             // 读取并显示前10个样本的数据
             println!("📊 样本数据预览 (前10个样本):");
-            for (signal_idx, signal) in header.signals.iter().enumerate() {
+            for signal_idx in 0..signals.len() {
+                let signal = &signals[signal_idx];
                 println!("\n  {} ({}):", signal.label, signal.physical_dimension);
                 
                 // 重置到文件开头
@@ -86,12 +108,11 @@ fn main() -> Result<()> {
             
             // 测试定位功能
             println!("\n🎯 测试文件定位功能:");
-            if !header.signals.is_empty() {
+            if !signals.is_empty() {
                 let signal_idx = 0;
-                let signal = &header.signals[signal_idx];
+                let mid_position = signals[signal_idx].samples_in_file / 2;
                 
                 // 定位到中间位置
-                let mid_position = signal.samples_in_file / 2;
                 reader.seek(signal_idx, mid_position)?;
                 let current_pos = reader.tell(signal_idx)?;
                 println!("  定位到信号 {} 的位置 {} (目标: {})", signal_idx, current_pos, mid_position);

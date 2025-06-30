@@ -4,6 +4,8 @@ use chrono::{NaiveDate, NaiveTime};
 /// 
 /// Currently only EDF+ format is supported as it's the modern standard
 /// with support for annotations and extended metadata.
+/// 
+/// This type is used internally for file format validation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FileType {
     /// EDF+ format - European Data Format Plus
@@ -13,15 +15,6 @@ pub enum FileType {
     /// - Extended patient information  
     /// - Equipment information
     /// - Standardized field formats
-    /// 
-    /// # Examples
-    /// 
-    /// ```rust
-    /// use edfplus::FileType;
-    /// 
-    /// let file_type = FileType::EdfPlus;
-    /// assert_eq!(format!("{:?}", file_type), "EdfPlus");
-    /// ```
     EdfPlus,
 }
 
@@ -154,8 +147,8 @@ impl SignalParam {
     /// };
     /// 
     /// let offset = signal.offset();
-    /// // The offset should position the conversion correctly
-    /// assert!(offset > 32000.0); // Should be positive and large
+    /// // The offset should position the conversion correctly  
+    /// assert!(offset.abs() < 1.0); // Should be close to zero for symmetric ranges
     /// ```
     pub fn offset(&self) -> f64 {
         self.physical_max / self.bit_value() - self.digital_max as f64
@@ -313,10 +306,31 @@ pub struct Annotation {
 /// 
 /// # Examples
 /// 
-/// ```rust,no_run
-/// use edfplus::EdfReader;
+/// ```rust
+/// use edfplus::{EdfReader, EdfWriter, SignalParam};
+/// # use std::fs;
 /// 
-/// let mut reader = EdfReader::open("recording.edf").unwrap();
+/// # // Create a test file first
+/// # let mut writer = EdfWriter::create("test_header_example.edf").unwrap();
+/// # writer.set_patient_info("P001", "M", "01-JAN-1990", "Test Patient").unwrap();
+/// # let signal = SignalParam {
+/// #     label: "EEG".to_string(),
+/// #     samples_in_file: 0,
+/// #     physical_max: 100.0,
+/// #     physical_min: -100.0,
+/// #     digital_max: 32767,
+/// #     digital_min: -32768,
+/// #     samples_per_record: 256,
+/// #     physical_dimension: "uV".to_string(),
+/// #     prefilter: "HP:0.1Hz".to_string(),
+/// #     transducer: "AgAgCl".to_string(),
+/// # };
+/// # writer.add_signal(signal).unwrap();
+/// # let samples = vec![10.0; 256];
+/// # writer.write_samples(&[samples]).unwrap();
+/// # writer.finalize().unwrap();
+/// 
+/// let mut reader = EdfReader::open("test_header_example.edf").unwrap();
 /// let header = reader.header();
 /// 
 /// println!("Recording duration: {:.2} seconds", 
@@ -330,38 +344,12 @@ pub struct Annotation {
 ///         i, signal.label, signal.physical_dimension, 
 ///         signal.samples_per_record);
 /// }
+/// 
+/// # // Cleanup
+/// # drop(reader);
+/// # fs::remove_file("test_header_example.edf").ok();
 /// ```
-#[derive(Debug, Clone)]
-/// Complete EDF+ file header information
-/// 
-/// Contains all metadata about the recording, including patient information,
-/// recording parameters, and signal definitions.
-/// 
-/// # Examples
-/// 
-/// ```rust,no_run
-/// use edfplus::EdfReader;
-/// 
-/// let mut reader = EdfReader::open("recording.edf").unwrap();
-/// let header = reader.header();
-/// 
-/// println!("Recording duration: {:.2} seconds", 
-///     header.file_duration as f64 / 10_000_000.0);
-/// println!("Number of signals: {}", header.signals.len());
-/// println!("Patient: {} ({})", header.patient_name, header.patient_code);
-/// println!("Equipment: {}", header.equipment);
-/// 
-/// for (i, signal) in header.signals.iter().enumerate() {
-///     println!("Signal {}: {} ({} {})", 
-///         i, signal.label, signal.physical_dimension, 
-///         signal.samples_per_record);
-/// }
-/// ```
-#[derive(Debug, Clone)]
 pub struct EdfHeader {
-    /// File format type (currently only EDF+ is supported)
-    pub file_type: FileType,
-    
     /// List of all signals in the file (excluding annotation signals)
     /// 
     /// Each signal contains its own parameters like sampling rate,
@@ -374,15 +362,40 @@ pub struct EdfHeader {
     /// 
     /// # Examples
     /// 
-    /// ```rust,no_run  
-    /// use edfplus::EdfReader;
+    /// ```rust
+    /// use edfplus::{EdfReader, EdfWriter, SignalParam};
+    /// # use std::fs;
     /// 
-    /// let mut reader = EdfReader::open("test.edf").unwrap();
+    /// # // Create a test file first
+    /// # let mut writer = EdfWriter::create("test_duration.edf").unwrap();
+    /// # writer.set_patient_info("P001", "M", "01-JAN-1990", "Test Patient").unwrap();
+    /// # let signal = SignalParam {
+    /// #     label: "EEG".to_string(),
+    /// #     samples_in_file: 0,
+    /// #     physical_max: 100.0,
+    /// #     physical_min: -100.0,
+    /// #     digital_max: 32767,
+    /// #     digital_min: -32768,
+    /// #     samples_per_record: 256,
+    /// #     physical_dimension: "uV".to_string(),
+    /// #     prefilter: "HP:0.1Hz".to_string(),
+    /// #     transducer: "AgAgCl".to_string(),
+    /// # };
+    /// # writer.add_signal(signal).unwrap();
+    /// # let samples = vec![10.0; 256];
+    /// # writer.write_samples(&[samples]).unwrap();
+    /// # writer.finalize().unwrap();
+    /// 
+    /// let mut reader = EdfReader::open("test_duration.edf").unwrap();
     /// let header = reader.header();
     /// 
     /// let duration_seconds = header.file_duration as f64 / 10_000_000.0;
     /// let duration_minutes = duration_seconds / 60.0;
     /// println!("Recording length: {:.1} minutes", duration_minutes);
+    /// 
+    /// # // Cleanup
+    /// # drop(reader);
+    /// # fs::remove_file("test_duration.edf").ok();
     /// ```
     pub file_duration: i64,
     

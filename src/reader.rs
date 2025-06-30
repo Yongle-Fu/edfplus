@@ -3,11 +3,77 @@ use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 use chrono::{NaiveDate, NaiveTime};
 
-use crate::types::{EdfHeader, SignalParam, FileType, Annotation};
+use crate::types::{EdfHeader, SignalParam, Annotation};
 use crate::error::{EdfError, Result};
 use crate::utils::{atoi_nonlocalized, atof_nonlocalized, parse_edf_time};
 use crate::EDFLIB_TIME_DIMENSION;
 
+/// EDF+ file reader for reading European Data Format Plus files
+/// 
+/// The `EdfReader` provides methods to open and read EDF+ files, which are
+/// commonly used for storing biosignal recordings like EEG, ECG, EMG, etc.
+/// 
+/// # Examples
+/// 
+/// ## Basic usage
+/// 
+/// ```rust
+/// use edfplus::EdfReader;
+/// 
+/// # // Generate test file (hidden from docs)
+/// # edfplus::doctest_utils::create_simple_test_file("recording.edf")?;
+/// # 
+/// // Open an EDF+ file
+/// let mut reader = EdfReader::open("recording.edf")?;
+/// 
+/// // Get header information
+/// let header = reader.header();
+/// println!("Duration: {:.1} seconds", header.file_duration as f64 / 10_000_000.0);
+/// println!("Signals: {}", header.signals.len());
+/// 
+/// // Read physical samples from first signal
+/// let samples = reader.read_physical_samples(0, 256)?;
+/// println!("Read {} samples", samples.len());
+/// 
+/// # // Cleanup (hidden from docs)
+/// # std::fs::remove_file("recording.edf").ok();
+/// # Ok::<(), edfplus::EdfError>(())
+/// ```
+/// ## Processing all signals
+/// 
+/// ```rust
+/// use edfplus::EdfReader;
+/// 
+/// # // Generate test file (hidden from docs)
+/// # edfplus::doctest_utils::create_multi_channel_test_file("multi_signal.edf")?;
+/// # 
+/// let mut reader = EdfReader::open("multi_signal.edf")?;
+/// let signal_count = reader.header().signals.len();
+/// 
+/// // Process each signal
+/// for i in 0..signal_count {
+///     let signal_label = reader.header().signals[i].label.clone();
+///     let signal_dimension = reader.header().signals[i].physical_dimension.clone();
+///     let samples_per_second = reader.header().signals[i].samples_per_record as usize;
+///     
+///     println!("Processing signal {}: {}", i, signal_label);
+///     
+///     // Read one second of data (assuming 256 Hz sampling rate)
+///     let physical_values = reader.read_physical_samples(i, samples_per_second)?;
+///     
+///     // Calculate basic statistics
+///     let mean = physical_values.iter().sum::<f64>() / physical_values.len() as f64;
+///     let max = physical_values.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+///     let min = physical_values.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+///     
+///     println!("  Mean: {:.2} {}", mean, signal_dimension);
+///     println!("  Range: {:.2} to {:.2} {}", min, max, signal_dimension);
+/// }
+/// 
+/// # // Cleanup (hidden from docs)
+/// # std::fs::remove_file("multi_signal.edf").ok();
+/// # Ok::<(), edfplus::EdfError>(())
+/// ```
 pub struct EdfReader {
     file: BufReader<File>,
     header: EdfHeader,
@@ -28,13 +94,67 @@ struct SignalInfo {
     /// 信号在数据记录中的字节偏移
     buffer_offset: usize,
     /// 每个数据记录中的样本数
+    #[allow(dead_code)]
     samples_per_record: i32,
     /// 是否是注释信号
+    #[allow(dead_code)]
     is_annotation: bool,
 }
 
 impl EdfReader {
-    /// 打开EDF+文件进行读取
+    /// Opens an EDF+ file for reading
+    /// 
+    /// This method opens the specified file, validates it as a proper EDF+ file,
+    /// and parses the header information. Only EDF+ format is supported.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `path` - Path to the EDF+ file to open
+    /// 
+    /// # Returns
+    /// 
+    /// Returns a `Result<EdfReader, EdfError>`. On success, contains an `EdfReader`
+    /// instance ready for reading data. On failure, contains an error describing
+    /// what went wrong.
+    /// 
+    /// # Errors
+    /// 
+    /// * `EdfError::FileNotFound` - File doesn't exist or can't be opened
+    /// * `EdfError::UnsupportedFileType` - File is not EDF+ format
+    /// * `EdfError::InvalidHeader` - File header is corrupted or invalid
+    /// * `EdfError::InvalidSignalCount` - Invalid number of signals
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// use edfplus::EdfReader;
+    /// 
+    /// # // Generate test file (hidden from docs)
+    /// # edfplus::doctest_utils::create_simple_test_file("recording.edf")?;
+    /// # 
+    /// // Open a file successfully
+    /// match EdfReader::open("recording.edf") {
+    ///     Ok(reader) => {
+    ///         println!("File opened successfully!");
+    ///         println!("Duration: {:.1} seconds", 
+    ///             reader.header().file_duration as f64 / 10_000_000.0);
+    ///     }
+    ///     Err(e) => eprintln!("Failed to open file: {}", e),
+    /// }
+    /// 
+    /// // Handle different error types
+    /// match EdfReader::open("nonexistent.edf") {
+    ///     Ok(_) => println!("Unexpected success"),
+    ///     Err(edfplus::EdfError::FileNotFound(msg)) => {
+    ///         println!("File not found: {}", msg);
+    ///     }
+    ///     Err(e) => println!("Other error: {}", e),
+    /// }
+    /// 
+    /// # // Cleanup (hidden from docs)
+    /// # std::fs::remove_file("recording.edf").ok();
+    /// # Ok::<(), edfplus::EdfError>(())
+    /// ```
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let file = File::open(&path)
             .map_err(|e| EdfError::FileNotFound(format!("{}: {}", path.as_ref().display(), e)))?;
@@ -61,17 +181,190 @@ impl EdfReader {
         })
     }
     
-    /// 获取文件头信息
+    /// Gets a reference to the file header information
+    /// 
+    /// The header contains all metadata about the recording including:
+    /// - Patient information (name, code, birth date, etc.)
+    /// - Recording information (start time, duration, equipment, etc.)
+    /// - Signal parameters (labels, sampling rates, physical ranges, etc.)
+    /// - File format details
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// use edfplus::EdfReader;
+    /// 
+    /// # // Generate test file (hidden from docs) 
+    /// # edfplus::doctest_utils::create_simple_test_file("recording.edf")?;
+    /// # 
+    /// let reader = EdfReader::open("recording.edf")?;
+    /// let header = reader.header();
+    /// 
+    /// // Display basic file information
+    /// println!("Patient: {}", header.patient_name);
+    /// println!("Recording duration: {:.2} seconds", 
+    ///     header.file_duration as f64 / 10_000_000.0);
+    /// println!("Number of signals: {}", header.signals.len());
+    /// 
+    /// // Display signal information
+    /// for (i, signal) in header.signals.iter().enumerate() {
+    ///     println!("Signal {}: {} ({})", 
+    ///         i, signal.label, signal.physical_dimension);
+    ///     println!("  Sample rate: {} Hz", signal.samples_per_record);
+    ///     println!("  Range: {} to {} {}", 
+    ///         signal.physical_min, signal.physical_max, signal.physical_dimension);
+    /// }
+    /// 
+    /// # // Cleanup (hidden from docs)
+    /// # std::fs::remove_file("recording.edf").ok();
+    /// # Ok::<(), edfplus::EdfError>(())
+    /// ```
     pub fn header(&self) -> &EdfHeader {
         &self.header
     }
     
-    /// 获取注释列表
+    /// Gets a reference to the list of annotations in the file
+    /// 
+    /// Annotations represent events, markers, and metadata that occurred
+    /// during the recording. Common examples include sleep stages, seizures,
+    /// artifacts, stimuli, and user-defined events.
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// use edfplus::{EdfReader, EdfWriter, SignalParam, Annotation};
+    /// # use std::fs;
+    /// 
+    /// # // Create a test file (without annotations for this example)
+    /// # let mut writer = EdfWriter::create("test_annotations.edf").unwrap();
+    /// # writer.set_patient_info("P001", "M", "01-JAN-1990", "Test Patient").unwrap();
+    /// # let signal = SignalParam {
+    /// #     label: "EEG".to_string(),
+    /// #     samples_in_file: 0,
+    /// #     physical_max: 100.0,
+    /// #     physical_min: -100.0,
+    /// #     digital_max: 32767,
+    /// #     digital_min: -32768,
+    /// #     samples_per_record: 256,
+    /// #     physical_dimension: "uV".to_string(),
+    /// #     prefilter: "HP:0.1Hz".to_string(),
+    /// #     transducer: "AgAgCl".to_string(),
+    /// # };
+    /// # writer.add_signal(signal).unwrap();
+    /// # let samples = vec![10.0; 256];
+    /// # writer.write_samples(&[samples]).unwrap();
+    /// # writer.finalize().unwrap();
+    /// 
+    /// let reader = EdfReader::open("test_annotations.edf").unwrap();
+    /// let annotations = reader.annotations();
+    /// 
+    /// println!("Found {} annotations", annotations.len());
+    /// 
+    /// for (i, annotation) in annotations.iter().enumerate() {
+    ///     let onset_seconds = annotation.onset as f64 / 10_000_000.0;
+    ///     let duration_seconds = if annotation.duration >= 0 {
+    ///         annotation.duration as f64 / 10_000_000.0
+    ///     } else {
+    ///         0.0  // Instantaneous event
+    ///     };
+    ///     
+    ///     println!("Annotation {}: {} at {:.2}s (duration: {:.2}s)",
+    ///         i, annotation.description, onset_seconds, duration_seconds);
+    /// }
+    /// 
+    /// # // Cleanup
+    /// # drop(reader);
+    /// # fs::remove_file("test_annotations.edf").ok();
+    /// ```
     pub fn annotations(&self) -> &[Annotation] {
         &self.annotations
     }
     
-    /// 读取指定信号的物理值样本
+    /// Reads physical value samples from the specified signal
+    /// 
+    /// Physical values are the real-world measurements (e.g., microvolts for EEG,
+    /// millivolts for ECG) as opposed to the raw digital values stored in the file.
+    /// The conversion from digital to physical values is performed automatically
+    /// using the signal's calibration parameters.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `signal` - Zero-based index of the signal to read from
+    /// * `count` - Number of samples to read
+    /// 
+    /// # Returns
+    /// 
+    /// Vector of physical values in the signal's physical dimension (e.g., µV, mV).
+    /// 
+    /// # Errors
+    /// 
+    /// * `EdfError::InvalidSignalIndex` - Signal index is out of bounds
+    /// * `EdfError::FileReadError` - I/O error reading from file
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// use edfplus::EdfReader;
+    /// 
+    /// # // Generate test file (hidden from docs)
+    /// # edfplus::doctest_utils::create_simple_test_file("eeg_recording.edf")?;
+    /// # 
+    /// let mut reader = EdfReader::open("eeg_recording.edf")?;
+    /// 
+    /// // Read 1 second of EEG data (assuming 256 Hz)
+    /// let samples = reader.read_physical_samples(0, 256)?;
+    /// 
+    /// // Get header after reading samples
+    /// let header = reader.header();
+    /// 
+    /// // Calculate basic statistics
+    /// let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+    /// let max_value = samples.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+    /// let min_value = samples.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+    /// 
+    /// println!("Signal: {}", header.signals[0].label);
+    /// println!("Mean: {:.2} {}", mean, header.signals[0].physical_dimension);
+    /// println!("Range: {:.2} to {:.2} {}", 
+    ///     min_value, max_value, header.signals[0].physical_dimension);
+    /// 
+    /// # // Cleanup (hidden from docs)
+    /// # std::fs::remove_file("eeg_recording.edf").ok();
+    /// # Ok::<(), edfplus::EdfError>(())
+    /// ```
+    /// 
+    /// ## Processing multiple signals
+    /// 
+    /// ```rust
+    /// use edfplus::EdfReader;
+    /// 
+    /// # // Generate test file (hidden from docs)
+    /// # edfplus::doctest_utils::create_multi_channel_test_file("multi_channel.edf")?;
+    /// # 
+    /// let mut reader = EdfReader::open("multi_channel.edf")?;
+    /// let signal_count = reader.header().signals.len();
+    /// 
+    /// // Read data from all signals  
+    /// for signal_idx in 0..signal_count {
+    ///     let signal_label = reader.header().signals[signal_idx].label.clone();
+    ///     let signal_dimension = reader.header().signals[signal_idx].physical_dimension.clone();
+    ///     let samples_per_record = reader.header().signals[signal_idx].samples_per_record as usize;
+    ///     
+    ///     // Read one record worth of data (safe amount)
+    ///     let samples = reader.read_physical_samples(signal_idx, samples_per_record)?;
+    ///     
+    ///     println!("Signal {}: {} samples from {}", 
+    ///         signal_label, samples.len(), signal_dimension);
+    ///         
+    ///     // Find peak-to-peak amplitude
+    ///     let max = samples.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+    ///     let min = samples.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+    ///     println!("  Amplitude: {:.2} {}", max - min, signal_dimension);
+    /// }
+    /// 
+    /// # // Cleanup (hidden from docs)
+    /// # std::fs::remove_file("multi_channel.edf").ok();
+    /// # Ok::<(), edfplus::EdfError>(())
+    /// ```
     pub fn read_physical_samples(&mut self, signal: usize, count: usize) -> Result<Vec<f64>> {
         let digital_samples = self.read_digital_samples(signal, count)?;
         
@@ -88,7 +381,95 @@ impl EdfReader {
         Ok(physical_samples)
     }
     
-    /// 读取指定信号的数字值样本
+    /// Reads digital value samples from the specified signal
+    /// 
+    /// Digital values are the raw integer values stored in the EDF+ file,
+    /// before conversion to physical units. These are typically 16-bit
+    /// signed integers representing the ADC output.
+    /// 
+    /// Most users should use `read_physical_samples()` instead, which
+    /// automatically converts to real-world units.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `signal` - Zero-based index of the signal to read from  
+    /// * `count` - Number of samples to read
+    /// 
+    /// # Returns
+    /// 
+    /// Vector of digital values as signed 32-bit integers.
+    /// 
+    /// # Errors
+    /// 
+    /// * `EdfError::InvalidSignalIndex` - Signal index is out of bounds
+    /// * `EdfError::FileReadError` - I/O error reading from file
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// use edfplus::EdfReader;
+    /// 
+    /// # // Generate test file (hidden from docs)
+    /// # edfplus::doctest_utils::create_simple_test_file("recording.edf")?;
+    /// # 
+    /// let mut reader = EdfReader::open("recording.edf")?;
+    /// 
+    /// // Read raw digital values
+    /// let digital_samples = reader.read_digital_samples(0, 100)?;
+    /// 
+    /// // Get header after reading
+    /// let header = reader.header();
+    /// let signal = &header.signals[0];
+    /// 
+    /// // Manual conversion to physical values
+    /// let physical_samples: Vec<f64> = digital_samples
+    ///     .iter()
+    ///     .map(|&d| signal.to_physical(d))
+    ///     .collect();
+    /// 
+    /// println!("Digital range: {} to {}", 
+    ///     digital_samples.iter().min().unwrap(),
+    ///     digital_samples.iter().max().unwrap());
+    /// 
+    /// # // Cleanup (hidden from docs)
+    /// # std::fs::remove_file("recording.edf").ok();
+    /// # Ok::<(), edfplus::EdfError>(())
+    /// ```
+    /// 
+    /// ## Checking digital value ranges
+    /// 
+    /// ```rust
+    /// use edfplus::EdfReader;
+    /// 
+    /// # // Generate test file (hidden from docs)
+    /// # edfplus::doctest_utils::create_validation_test_file("test.edf")?;
+    /// # 
+    /// let mut reader = EdfReader::open("test.edf")?;
+    /// let signal_count = reader.header().signals.len();
+    /// 
+    /// for i in 0..signal_count {
+    ///     let signal_label = reader.header().signals[i].label.clone();
+    ///     let digital_min = reader.header().signals[i].digital_min;
+    ///     let digital_max = reader.header().signals[i].digital_max;
+    ///     
+    ///     let samples = reader.read_digital_samples(i, 10)?;
+    ///     
+    ///     let min_val = *samples.iter().min().unwrap();
+    ///     let max_val = *samples.iter().max().unwrap();
+    ///     
+    ///     println!("Signal {}: digital range {} to {} (expected: {} to {})",
+    ///         signal_label, min_val, max_val, digital_min, digital_max);
+    ///         
+    ///     // Check for clipping
+    ///     if min_val <= digital_min || max_val >= digital_max {
+    ///         println!("  Warning: Signal may be clipped!");
+    ///     }
+    /// }
+    /// 
+    /// # // Cleanup (hidden from docs)
+    /// # std::fs::remove_file("test.edf").ok();
+    /// # Ok::<(), edfplus::EdfError>(())
+    /// ```
     pub fn read_digital_samples(&mut self, signal: usize, count: usize) -> Result<Vec<i32>> {
         if signal >= self.header.signals.len() {
             return Err(EdfError::InvalidSignalIndex(signal));
@@ -265,7 +646,6 @@ impl EdfReader {
             Self::parse_edfplus_recording(&recording_field)?;
         
         let header = EdfHeader {
-            file_type: FileType::EdfPlus,
             signals,
             file_duration: datarecord_duration * datarecords,
             start_date,

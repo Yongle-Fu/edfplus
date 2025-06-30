@@ -7,12 +7,33 @@
 //!
 //! ### Reading an EDF+ file
 //!
-//! ```rust,no_run
-//! use edfplus::{EdfReader, Result};
+//! ```rust
+//! use edfplus::{EdfReader, EdfWriter, SignalParam, Result};
+//! # use std::fs;
 //!
 //! fn main() -> Result<()> {
+//!     # // Create a test file first
+//!     # let mut writer = EdfWriter::create("test_data.edf")?;
+//!     # writer.set_patient_info("P001", "M", "01-JAN-1990", "Test Patient")?;
+//!     # let signal = SignalParam {
+//!     #     label: "EEG".to_string(),
+//!     #     samples_in_file: 0,
+//!     #     physical_max: 100.0,
+//!     #     physical_min: -100.0,
+//!     #     digital_max: 32767,
+//!     #     digital_min: -32768,
+//!     #     samples_per_record: 256,
+//!     #     physical_dimension: "uV".to_string(),
+//!     #     prefilter: "HP:0.1Hz".to_string(),
+//!     #     transducer: "AgAgCl".to_string(),
+//!     # };
+//!     # writer.add_signal(signal)?;
+//!     # let samples = vec![10.0; 256];
+//!     # for _ in 0..10 { writer.write_samples(&[samples.clone()])?; }
+//!     # writer.finalize()?;
+//! 
 //!     // Open an EDF+ file
-//!     let mut reader = EdfReader::open("data.edf")?;
+//!     let mut reader = EdfReader::open("test_data.edf")?;
 //!     
 //!     // Get file information
 //!     let header = reader.header();
@@ -26,18 +47,22 @@
 //!         println!("Read {} samples", samples.len());
 //!     }
 //!     
+//!     # // Cleanup
+//!     # drop(reader);
+//!     # fs::remove_file("test_data.edf").ok();
 //!     Ok(())
 //! }
 //! ```
 //!
 //! ### Creating an EDF+ file
 //!
-//! ```rust,no_run
+//! ```rust
 //! use edfplus::{EdfWriter, SignalParam, Result};
+//! # use std::fs;
 //!
 //! fn main() -> Result<()> {
 //!     // Create a writer
-//!     let mut writer = EdfWriter::create("output.edf")?;
+//!     let mut writer = EdfWriter::create("test_output.edf")?;
 //!     
 //!     // Set patient information
 //!     writer.set_patient_info("P001", "M", "01-JAN-1990", "Patient Name")?;
@@ -70,6 +95,8 @@
 //!     writer.write_samples(&[samples])?;
 //!     writer.finalize()?;
 //!     
+//!     # // Cleanup
+//!     # fs::remove_file("test_output.edf").ok();
 //!     Ok(())
 //! }
 //! ```
@@ -114,9 +141,12 @@ pub mod utils;
 pub mod reader;
 pub mod writer; // 新增
 
+#[doc(hidden)]
+pub mod doctest_utils; // For internal doctest support
+
 // Re-export main types for convenience
 pub use error::{EdfError, Result};
-pub use types::{EdfHeader, SignalParam, Annotation, FileType};
+pub use types::{EdfHeader, SignalParam, Annotation};
 pub use reader::EdfReader;
 pub use writer::EdfWriter; // 新增
 
