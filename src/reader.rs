@@ -8,6 +8,15 @@ use crate::error::{EdfError, Result};
 use crate::utils::{atoi_nonlocalized, atof_nonlocalized, parse_edf_time};
 use crate::EDFLIB_TIME_DIMENSION;
 
+/// TAL parsing state machine states
+#[derive(Debug, Clone, PartialEq)]
+enum TalState {
+    WaitingForOnset,        // Waiting for onset field (start of TAL)
+    CollectingOnset,        // Collecting onset time characters
+    CollectingDuration,     // Collecting duration characters
+    CollectingDescription,  // Collecting description text
+}
+
 /// EDF+ file reader for reading European Data Format Plus files
 /// 
 /// The `EdfReader` provides methods to open and read EDF+ files, which are
@@ -1029,50 +1038,52 @@ impl EdfReader {
             return Ok(annotations);
         }
         
-        // 临时调试输出
-        println!("DEBUG: 开始解析TAL数据，长度: {}", max);
-        let preview_len = 50.min(max);
-        print!("DEBUG: 前{}字节: ", preview_len);
-        for i in 0..preview_len {
-            let byte = data[i];
-            if byte >= 32 && byte <= 126 {
-                print!("{}", byte as char);
-            } else if byte == 0x14 {
-                print!("\\x14");
-            } else if byte == 0x15 {
-                print!("\\x15");
-            } else if byte == 0 {
-                print!("\\0");
-            } else {
-                print!("\\x{:02x}", byte);
-            }
-        }
-        println!();
+        // // 临时调试输出
+        // println!("DEBUG: 开始解析TAL数据，长度: {}", max);
+        // let preview_len = 50.min(max);
+        // print!("DEBUG: 前{}字节: ", preview_len);
+        // for i in 0..preview_len {
+        //     let byte = data[i];
+        //     if byte >= 32 && byte <= 126 {
+        //         print!("{}", byte as char);
+        //     } else if byte == 0x14 {
+        //         print!("\\x14");
+        //     } else if byte == 0x15 {
+        //         print!("\\x15");
+        //     } else if byte == 0 {
+        //         print!("\\0");
+        //     } else {
+        //         print!("\\x{:02x}", byte);
+        //     }
+        // }
+        // println!();
         
         let mut k = 0;
-        let mut onset = false;
-        let mut duration = false;
-        let mut duration_start = false;
+        let mut state = TalState::WaitingForOnset;
         let mut n = 0;
         let mut scratchpad = vec![0u8; max + 16];
         let mut time_in_txt = vec![0u8; 32];
         let mut duration_in_txt = vec![0u8; 32];
         let mut zero = 0;
         let mut annots_in_record = 0;
+        let mut _annots_in_tal = 0;
+        let mut duration = false;
         
         while k < max - 1 {
             let byte = data[k];
             
+            // 处理null字节（TAL结束标记）
             if byte == 0 {
                 if zero == 0 {
                     if k > 0 && data[k - 1] != 20 {
                         // 格式错误：null字节前应该是分隔符
                         break;
                     }
-                    n = 0;                onset = false;
-                duration = false;
-                duration_start = false;
-                scratchpad.fill(0);
+                    // 重置状态到新TAL开始
+                    state = TalState::WaitingForOnset;
+                    n = 0;
+                    scratchpad.fill(0);
+                    _annots_in_tal = 0;
                 }
                 zero += 1;
                 k += 1;
@@ -1085,172 +1096,191 @@ impl EdfReader {
             }
             zero = 0;
             
-            // 处理TAL分隔符
-            if byte == 20 || byte == 21 { // 0x14 (20) 或 0x15 (21)
-                if byte == 21 { // Duration分隔符
-                    println!("DEBUG: 找到duration分隔符，位置: {}, onset={}, duration={}, duration_start={}", 
-                            k, onset, duration, duration_start);
-                    if duration || duration_start {
-                        println!("DEBUG: 错误 - 多个duration字段");
-                        break; // 不允许多个duration字段
+            // 主状态机逻辑 - 基于edflib的布尔逻辑适应到Rust enum
+            match state {
+                TalState::WaitingForOnset => {
+                    // 等待onset开始，跳过前导'+'
+                    if byte == b'+' {
+                        state = TalState::CollectingOnset;
+                        n = 0;
+                    } else if byte == 20 || byte == 21 {
+                        // 如果没有onset就遇到分隔符，说明格式错误
+                        break;
                     }
-                    
-                    // 如果我们还在收集onset数据，先完成onset字段
-                    if !onset {
+                    k += 1;
+                }
+                
+                TalState::CollectingOnset => {
+                    if byte == 20 { // Onset分隔符
+                        // 完成onset收集
                         scratchpad[n] = 0;
+                        let onset_str = String::from_utf8_lossy(&scratchpad[0..n]);
                         
                         // 验证onset格式
-                        let onset_str = String::from_utf8_lossy(&scratchpad[0..n]);
                         if !Self::is_valid_onset(&onset_str) {
-                            println!("DEBUG: 错误 - 无效的onset格式: '{}'", onset_str);
+                            // println!("DEBUG: 无效的onset格式: '{}'", onset_str);
                             break;
                         }
                         
-                        // 复制onset时间
+                        // 保存onset时间
                         let copy_len = n.min(time_in_txt.len() - 1);
                         time_in_txt[..copy_len].copy_from_slice(&scratchpad[..copy_len]);
                         time_in_txt[copy_len] = 0;
                         
-                        onset = true;
+                        state = TalState::CollectingDescription;
                         n = 0;
-                        println!("DEBUG: 完成onset字段: '{}'", onset_str);
+                        
+                        // println!("DEBUG: 完成onset字段: '{}'", onset_str);
+                    } else if byte == 21 { // Duration分隔符
+                        // 完成onset收集，开始duration
+                        scratchpad[n] = 0;
+                        let onset_str = String::from_utf8_lossy(&scratchpad[0..n]);
+                        
+                        // 验证onset格式
+                        if !Self::is_valid_onset(&onset_str) {
+                            // println!("DEBUG: 无效的onset格式: '{}'", onset_str);
+                            break;
+                        }
+                        
+                        // 保存onset时间
+                        let copy_len = n.min(time_in_txt.len() - 1);
+                        time_in_txt[..copy_len].copy_from_slice(&scratchpad[..copy_len]);
+                        time_in_txt[copy_len] = 0;
+                        
+                        state = TalState::CollectingDuration;
+                        n = 0;
+                        
+                        // println!("DEBUG: 完成onset字段: '{}', 开始duration", onset_str);
+                    } else {
+                        // 收集onset字符
+                        if n < scratchpad.len() - 1 {
+                            scratchpad[n] = byte;
+                            n += 1;
+                        }
                     }
-                    
-                    duration_start = true;
-                    println!("DEBUG: 开始duration字段");
+                    k += 1;
                 }
                 
-                if byte == 20 && onset && !duration_start {
-                    // 描述字段结束 - 检查是否应该创建注释
-                    let description = if n > 0 {
-                        String::from_utf8_lossy(&scratchpad[0..n]).to_string()
-                    } else {
-                        String::new()
-                    };
-                    
-                    println!("DEBUG: 描述字段结束，描述='{}', 记录中的注释数={}", description, annots_in_record);
-                    
-                    // 根据EDF+标准，时间戳注释（timestamp annotations）有空描述
-                    // 且通常在每个数据记录的开头。用户注释即使描述为空也应该保留
-                    let is_timestamp_annotation = is_first_annotation_signal && 
-                                                   annots_in_record == 0 && 
-                                                   description.is_empty();
-                    
-                    println!("DEBUG: 是时间戳注释={}, 是第一个注释信号={}, 记录中注释数={}", 
-                            is_timestamp_annotation, is_first_annotation_signal, annots_in_record);
-                    
-                    if !is_timestamp_annotation {
-                        let time_str = String::from_utf8_lossy(&time_in_txt)
-                            .trim_end_matches('\0').to_string();
+                TalState::CollectingDuration => {
+                    if byte == 20 { // Duration分隔符（转向描述）
+                        // 完成duration收集
+                        scratchpad[n] = 0;
+                        let duration_str = String::from_utf8_lossy(&scratchpad[0..n]);
                         
-                        if let Ok(onset_seconds) = time_str.parse::<f64>() {
-                            // 计算绝对时间戳
-                            let onset_time = (onset_seconds * EDFLIB_TIME_DIMENSION as f64) as i64;
+                        // 验证duration格式
+                        if !Self::is_valid_duration(&duration_str) {
+                            // println!("DEBUG: 无效的duration格式: '{}'", duration_str);
+                            break;
+                        }
+                        
+                        // 保存duration
+                        let copy_len = n.min(duration_in_txt.len() - 1);
+                        duration_in_txt[..copy_len].copy_from_slice(&scratchpad[..copy_len]);
+                        duration_in_txt[copy_len] = 0;
+                        
+                        duration = true;
+                        state = TalState::CollectingDescription;
+                        n = 0;
+                        
+                        // println!("DEBUG: 完成duration字段: '{}'", duration_str);
+                    } else if byte == 21 {
+                        // 不允许在duration状态下再次遇到duration分隔符
+                        // println!("DEBUG: 错误 - 多个duration字段");
+                        break;
+                    } else {
+                        // 收集duration字符
+                        if n < scratchpad.len() - 1 {
+                            scratchpad[n] = byte;
+                            n += 1;
+                        }
+                    }
+                    k += 1;
+                }
+                
+                TalState::CollectingDescription => {
+                    if byte == 20 { // 描述结束分隔符
+                        // 完成一个注释的收集
+                        let description = if n > 0 {
+                            String::from_utf8_lossy(&scratchpad[0..n]).to_string()
+                        } else {
+                            String::new()
+                        };
+                        
+                        // println!("DEBUG: 描述字段结束，描述='{}', 记录中的注释数={}", description, annots_in_record);
+                        
+                        // 根据EDF+标准，时间戳注释（timestamp annotations）有空描述
+                        // 且通常在每个数据记录的开头。用户注释即使描述为空也应该保留
+                        let is_timestamp_annotation = is_first_annotation_signal && 
+                                                       annots_in_record == 0 && 
+                                                       description.is_empty();
+                        
+                        // println!("DEBUG: 是时间戳注释={}, 是第一个注释信号={}, 记录中注释数={}", 
+                        //         is_timestamp_annotation, is_first_annotation_signal, annots_in_record);
+                        
+                        if !is_timestamp_annotation {
+                            let time_str = String::from_utf8_lossy(&time_in_txt)
+                                .trim_end_matches('\0').to_string();
                             
-                            // 从注释时间戳中减去文件的 starttime_offset（类似 edflib）
-                            let adjusted_onset = onset_time - self.header.starttime_subsecond;
-                            
-                            let duration_time = if duration {
-                                let duration_str = String::from_utf8_lossy(&duration_in_txt)
-                                    .trim_end_matches('\0').to_string();
-                                if let Ok(duration_seconds) = duration_str.parse::<f64>() {
-                                    (duration_seconds * EDFLIB_TIME_DIMENSION as f64) as i64
+                            if let Ok(onset_seconds) = time_str.parse::<f64>() {
+                                // 计算绝对时间戳
+                                let onset_time = (onset_seconds * EDFLIB_TIME_DIMENSION as f64) as i64;
+                                
+                                // 从注释时间戳中减去文件的 starttime_offset（类似 edflib）
+                                let adjusted_onset = onset_time - self.header.starttime_subsecond;
+                                
+                                let duration_time = if duration {
+                                    let duration_str = String::from_utf8_lossy(&duration_in_txt)
+                                        .trim_end_matches('\0').to_string();
+                                    if let Ok(duration_seconds) = duration_str.parse::<f64>() {
+                                        (duration_seconds * EDFLIB_TIME_DIMENSION as f64) as i64
+                                    } else {
+                                        -1
+                                    }
                                 } else {
                                     -1
-                                }
+                                };
+                                
+                                annotations.push(Annotation {
+                                    onset: adjusted_onset,
+                                    duration: duration_time,
+                                    description,
+                                });
+                                
+                                // println!("DEBUG: 添加注释 - onset={:.3}s, duration={:?}ms, 描述='{}'",
+                                        // onset_seconds, 
+                                        // if duration_time >= 0 { Some(duration_time as f64 / EDFLIB_TIME_DIMENSION as f64) } else { None },
+                                        // annotations.last().unwrap().description);
                             } else {
-                                -1
-                            };
-                            
-                            annotations.push(Annotation {
-                                onset: adjusted_onset,
-                                duration: duration_time,
-                                description,
-                            });
-                            
-                            println!("DEBUG: 添加注释 - onset={:.3}s, duration={:?}ms, 描述='{}'",
-                                    onset_seconds, 
-                                    if duration_time >= 0 { Some(duration_time as f64 / EDFLIB_TIME_DIMENSION as f64) } else { None },
-                                    annotations.last().unwrap().description);
+                                // println!("DEBUG: 无法解析onset时间: '{}'", time_str);
+                            }
                         } else {
-                            println!("DEBUG: 无法解析onset时间: '{}'", time_str);
+                            // println!("DEBUG: 跳过时间戳注释");
                         }
+                        
+                        annots_in_record += 1;
+                        _annots_in_tal += 1;
+                        
+                        // 重置状态变量以处理下一个注释
+                        state = TalState::WaitingForOnset;
+                        duration = false;
+                        n = 0;
+                        // 清理缓冲区
+                        scratchpad.fill(0);
+                        time_in_txt.fill(0);
+                        duration_in_txt.fill(0);
+                    } else if byte == 21 {
+                        // 在描述状态下不应该遇到duration分隔符
+                        break;
                     } else {
-                        println!("DEBUG: 跳过时间戳注释");
+                        // 收集描述字符
+                        if n < scratchpad.len() - 1 {
+                            scratchpad[n] = byte;
+                            n += 1;
+                        }
                     }
-                    
-                    annots_in_record += 1;
-                    
-                    // 重置状态变量以处理下一个注释
-                    onset = false;
-                    duration = false;
-                    duration_start = false;
-                    n = 0;
-                    // 清理缓冲区
-                    scratchpad.fill(0);
-                    time_in_txt.fill(0);
-                    duration_in_txt.fill(0);
                     k += 1;
-                    continue;
-                }
-                
-                if !onset {
-                    // Onset字段结束
-                    scratchpad[n] = 0;
-                    
-                    // 验证onset格式
-                    let onset_str = String::from_utf8_lossy(&scratchpad[0..n]);
-                    if !Self::is_valid_onset(&onset_str) {
-                        break;
-                    }
-                    
-                    // 复制onset时间
-                    let copy_len = n.min(time_in_txt.len() - 1);
-                    time_in_txt[..copy_len].copy_from_slice(&scratchpad[..copy_len]);
-                    time_in_txt[copy_len] = 0;
-                    
-                    onset = true;
-                    n = 0;
-                    k += 1;
-                    continue;
-                }
-                
-                if duration_start {
-                    // Duration字段结束
-                    scratchpad[n] = 0;
-                    
-                    // 验证duration格式
-                    let duration_str = String::from_utf8_lossy(&scratchpad[0..n]);
-                    if !Self::is_valid_duration(&duration_str) {
-                        break;
-                    }
-                    
-                    // 复制duration
-                    let copy_len = n.min(duration_in_txt.len() - 1);
-                    duration_in_txt[..copy_len].copy_from_slice(&scratchpad[..copy_len]);
-                    duration_in_txt[copy_len] = 0;
-                    
-                    duration = true;
-                    duration_start = false;
-                    n = 0;
-                    k += 1;
-                    continue;
-                }
-            } else {
-                // 常规字符
-                if byte == b'+' && !onset && n == 0 {
-                    // 跳过onset前的'+'号，但不存储
-                    k += 1;
-                    continue;
-                }
-                
-                if n < scratchpad.len() - 1 {
-                    scratchpad[n] = byte;
-                    n += 1;
                 }
             }
-            
-            k += 1;
         }
         
         Ok(annotations)
@@ -1390,25 +1420,26 @@ impl EdfReader {
         }
         
         let mut k = 0;
-        let mut onset = false;
-        let mut duration_start = false;
+        let mut state = TalState::WaitingForOnset;
         let mut n = 0;
         let mut scratchpad = vec![0u8; max + 16];
         let mut zero = 0;
         let mut annots_in_record = 0;
+        let mut _duration = false;
         
         while k < max - 1 {
             let byte = data[k];
             
+            // 处理null字节（TAL结束标记）
             if byte == 0 {
                 if zero == 0 {
                     if k > 0 && data[k - 1] != 20 {
                         // 格式错误：null字节前应该是分隔符
                         break;
                     }
+                    // 重置状态到新TAL开始
+                    state = TalState::WaitingForOnset;
                     n = 0;
-                    onset = false;
-                    duration_start = false;
                     scratchpad.fill(0);
                 }
                 zero += 1;
@@ -1422,103 +1453,118 @@ impl EdfReader {
             }
             zero = 0;
             
-            // 处理TAL分隔符
-            if byte == 20 || byte == 21 { // 0x14 (20) 或 0x15 (21)
-                if byte == 21 { // Duration分隔符
-                    if duration_start {
-                        break; // 不允许多个duration字段
+            // 主状态机逻辑
+            match state {
+                TalState::WaitingForOnset => {
+                    // 等待onset开始，跳过前导'+'
+                    if byte == b'+' {
+                        state = TalState::CollectingOnset;
+                        n = 0;
+                    } else if byte == 20 || byte == 21 {
+                        // 如果没有onset就遇到分隔符，说明格式错误
+                        break;
                     }
-                    
-                    // 如果我们还在收集onset数据，先完成onset字段
-                    if !onset {
+                    k += 1;
+                }
+                
+                TalState::CollectingOnset => {
+                    if byte == 20 { // Onset分隔符
+                        // 完成onset收集
                         scratchpad[n] = 0;
+                        let onset_str = String::from_utf8_lossy(&scratchpad[0..n]);
                         
                         // 验证onset格式
-                        let onset_str = String::from_utf8_lossy(&scratchpad[0..n]);
                         if !Self::is_valid_onset(&onset_str) {
                             break;
                         }
                         
-                        onset = true;
+                        state = TalState::CollectingDescription;
                         n = 0;
-                    }
-                    
-                    duration_start = true;
-                }
-                
-                if byte == 20 && onset && !duration_start {
-                    // 描述字段结束 - 检查是否应该计数这个注释
-                    let description = if n > 0 {
-                        String::from_utf8_lossy(&scratchpad[0..n]).to_string()
+                    } else if byte == 21 { // Duration分隔符
+                        // 完成onset收集，开始duration
+                        scratchpad[n] = 0;
+                        let onset_str = String::from_utf8_lossy(&scratchpad[0..n]);
+                        
+                        // 验证onset格式
+                        if !Self::is_valid_onset(&onset_str) {
+                            break;
+                        }
+                        
+                        state = TalState::CollectingDuration;
+                        n = 0;
                     } else {
-                        String::new()
-                    };
-                    
-                    // 与parse_tal_data使用相同的逻辑判断时间戳注释
-                    let is_timestamp_annotation = is_first_annotation_signal && 
-                                                   annots_in_record == 0 && 
-                                                   description.is_empty();
-                    
-                    if !is_timestamp_annotation {
-                        count += 1;
+                        // 收集onset字符
+                        if n < scratchpad.len() - 1 {
+                            scratchpad[n] = byte;
+                            n += 1;
+                        }
                     }
-                    
-                    annots_in_record += 1;
-                    
-                    // 重置状态变量以处理下一个注释
-                    onset = false;
-                    duration_start = false;
-                    n = 0;
                     k += 1;
-                    continue;
                 }
                 
-                if !onset {
-                    // Onset字段结束
-                    scratchpad[n] = 0;
-                    
-                    // 验证onset格式
-                    let onset_str = String::from_utf8_lossy(&scratchpad[0..n]);
-                    if !Self::is_valid_onset(&onset_str) {
+                TalState::CollectingDuration => {
+                    if byte == 20 { // Duration分隔符（转向描述）
+                        // 完成duration收集
+                        scratchpad[n] = 0;
+                        let duration_str = String::from_utf8_lossy(&scratchpad[0..n]);
+                        
+                        // 验证duration格式
+                        if !Self::is_valid_duration(&duration_str) {
+                            break;
+                        }
+                        
+                        _duration = true;
+                        state = TalState::CollectingDescription;
+                        n = 0;
+                    } else if byte == 21 {
+                        // 不允许在duration状态下再次遇到duration分隔符
                         break;
+                    } else {
+                        // 收集duration字符
+                        if n < scratchpad.len() - 1 {
+                            scratchpad[n] = byte;
+                            n += 1;
+                        }
                     }
-                    
-                    onset = true;
-                    n = 0;
                     k += 1;
-                    continue;
                 }
                 
-                if duration_start {
-                    // Duration字段结束
-                    scratchpad[n] = 0;
-                    
-                    // 验证duration格式
-                    let duration_str = String::from_utf8_lossy(&scratchpad[0..n]);
-                    if !Self::is_valid_duration(&duration_str) {
+                TalState::CollectingDescription => {
+                    if byte == 20 { // 描述结束分隔符
+                        // 完成一个注释的收集，与parse_tal_data使用相同的逻辑判断时间戳注释
+                        let description = if n > 0 {
+                            String::from_utf8_lossy(&scratchpad[0..n]).to_string()
+                        } else {
+                            String::new()
+                        };
+                        
+                        let is_timestamp_annotation = is_first_annotation_signal && 
+                                                       annots_in_record == 0 && 
+                                                       description.is_empty();
+                        
+                        if !is_timestamp_annotation {
+                            count += 1;
+                        }
+                        
+                        annots_in_record += 1;
+                        
+                        // 重置状态变量以处理下一个注释
+                        state = TalState::WaitingForOnset;
+                        _duration = false;
+                        n = 0;
+                    } else if byte == 21 {
+                        // 在描述状态下不应该遇到duration分隔符
                         break;
+                    } else {
+                        // 收集描述字符
+                        if n < scratchpad.len() - 1 {
+                            scratchpad[n] = byte;
+                            n += 1;
+                        }
                     }
-                    
-                    duration_start = false;
-                    n = 0;
                     k += 1;
-                    continue;
-                }
-            } else {
-                // 常规字符
-                if byte == b'+' && !onset && n == 0 {
-                    // 跳过onset前的'+'号，但不存储
-                    k += 1;
-                    continue;
-                }
-                
-                if n < scratchpad.len() - 1 {
-                    scratchpad[n] = byte;
-                    n += 1;
                 }
             }
-            
-            k += 1;
         }
         
         // 在第一个记录中尝试提取subsecond信息
