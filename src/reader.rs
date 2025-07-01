@@ -1029,6 +1029,26 @@ impl EdfReader {
             return Ok(annotations);
         }
         
+        // 临时调试输出
+        println!("DEBUG: 开始解析TAL数据，长度: {}", max);
+        let preview_len = 50.min(max);
+        print!("DEBUG: 前{}字节: ", preview_len);
+        for i in 0..preview_len {
+            let byte = data[i];
+            if byte >= 32 && byte <= 126 {
+                print!("{}", byte as char);
+            } else if byte == 0x14 {
+                print!("\\x14");
+            } else if byte == 0x15 {
+                print!("\\x15");
+            } else if byte == 0 {
+                print!("\\0");
+            } else {
+                print!("\\x{:02x}", byte);
+            }
+        }
+        println!();
+        
         let mut k = 0;
         let mut onset = false;
         let mut duration = false;
@@ -1038,7 +1058,6 @@ impl EdfReader {
         let mut time_in_txt = vec![0u8; 32];
         let mut duration_in_txt = vec![0u8; 32];
         let mut zero = 0;
-        let mut annots_in_tal = 0;
         let mut annots_in_record = 0;
         
         while k < max - 1 {
@@ -1050,12 +1069,10 @@ impl EdfReader {
                         // 格式错误：null字节前应该是分隔符
                         break;
                     }
-                    n = 0;
-                    onset = false;
-                    duration = false;
-                    duration_start = false;
-                    scratchpad.fill(0);
-                    annots_in_tal = 0;
+                    n = 0;                onset = false;
+                duration = false;
+                duration_start = false;
+                scratchpad.fill(0);
                 }
                 zero += 1;
                 k += 1;
@@ -1071,10 +1088,36 @@ impl EdfReader {
             // 处理TAL分隔符
             if byte == 20 || byte == 21 { // 0x14 (20) 或 0x15 (21)
                 if byte == 21 { // Duration分隔符
-                    if duration || duration_start || onset || annots_in_tal > 0 {
-                        break; // 不允许多个duration字段或位置错误
+                    println!("DEBUG: 找到duration分隔符，位置: {}, onset={}, duration={}, duration_start={}", 
+                            k, onset, duration, duration_start);
+                    if duration || duration_start {
+                        println!("DEBUG: 错误 - 多个duration字段");
+                        break; // 不允许多个duration字段
                     }
+                    
+                    // 如果我们还在收集onset数据，先完成onset字段
+                    if !onset {
+                        scratchpad[n] = 0;
+                        
+                        // 验证onset格式
+                        let onset_str = String::from_utf8_lossy(&scratchpad[0..n]);
+                        if !Self::is_valid_onset(&onset_str) {
+                            println!("DEBUG: 错误 - 无效的onset格式: '{}'", onset_str);
+                            break;
+                        }
+                        
+                        // 复制onset时间
+                        let copy_len = n.min(time_in_txt.len() - 1);
+                        time_in_txt[..copy_len].copy_from_slice(&scratchpad[..copy_len]);
+                        time_in_txt[copy_len] = 0;
+                        
+                        onset = true;
+                        n = 0;
+                        println!("DEBUG: 完成onset字段: '{}'", onset_str);
+                    }
+                    
                     duration_start = true;
+                    println!("DEBUG: 开始duration字段");
                 }
                 
                 if byte == 20 && onset && !duration_start {
@@ -1085,11 +1128,16 @@ impl EdfReader {
                         String::new()
                     };
                     
+                    println!("DEBUG: 描述字段结束，描述='{}', 记录中的注释数={}", description, annots_in_record);
+                    
                     // 根据EDF+标准，时间戳注释（timestamp annotations）有空描述
                     // 且通常在每个数据记录的开头。用户注释即使描述为空也应该保留
                     let is_timestamp_annotation = is_first_annotation_signal && 
                                                    annots_in_record == 0 && 
                                                    description.is_empty();
+                    
+                    println!("DEBUG: 是时间戳注释={}, 是第一个注释信号={}, 记录中注释数={}", 
+                            is_timestamp_annotation, is_first_annotation_signal, annots_in_record);
                     
                     if !is_timestamp_annotation {
                         let time_str = String::from_utf8_lossy(&time_in_txt)
@@ -1119,12 +1167,29 @@ impl EdfReader {
                                 duration: duration_time,
                                 description,
                             });
+                            
+                            println!("DEBUG: 添加注释 - onset={:.3}s, duration={:?}ms, 描述='{}'",
+                                    onset_seconds, 
+                                    if duration_time >= 0 { Some(duration_time as f64 / EDFLIB_TIME_DIMENSION as f64) } else { None },
+                                    annotations.last().unwrap().description);
+                        } else {
+                            println!("DEBUG: 无法解析onset时间: '{}'", time_str);
                         }
+                    } else {
+                        println!("DEBUG: 跳过时间戳注释");
                     }
                     
-                    annots_in_tal += 1;
                     annots_in_record += 1;
+                    
+                    // 重置状态变量以处理下一个注释
+                    onset = false;
+                    duration = false;
+                    duration_start = false;
                     n = 0;
+                    // 清理缓冲区
+                    scratchpad.fill(0);
+                    time_in_txt.fill(0);
+                    duration_in_txt.fill(0);
                     k += 1;
                     continue;
                 }
@@ -1330,7 +1395,6 @@ impl EdfReader {
         let mut n = 0;
         let mut scratchpad = vec![0u8; max + 16];
         let mut zero = 0;
-        let mut annots_in_tal = 0;
         let mut annots_in_record = 0;
         
         while k < max - 1 {
@@ -1346,7 +1410,6 @@ impl EdfReader {
                     onset = false;
                     duration_start = false;
                     scratchpad.fill(0);
-                    annots_in_tal = 0;
                 }
                 zero += 1;
                 k += 1;
@@ -1362,9 +1425,24 @@ impl EdfReader {
             // 处理TAL分隔符
             if byte == 20 || byte == 21 { // 0x14 (20) 或 0x15 (21)
                 if byte == 21 { // Duration分隔符
-                    if duration_start || onset || annots_in_tal > 0 {
-                        break; // 不允许多个duration字段或位置错误
+                    if duration_start {
+                        break; // 不允许多个duration字段
                     }
+                    
+                    // 如果我们还在收集onset数据，先完成onset字段
+                    if !onset {
+                        scratchpad[n] = 0;
+                        
+                        // 验证onset格式
+                        let onset_str = String::from_utf8_lossy(&scratchpad[0..n]);
+                        if !Self::is_valid_onset(&onset_str) {
+                            break;
+                        }
+                        
+                        onset = true;
+                        n = 0;
+                    }
+                    
                     duration_start = true;
                 }
                 
@@ -1385,8 +1463,11 @@ impl EdfReader {
                         count += 1;
                     }
                     
-                    annots_in_tal += 1;
                     annots_in_record += 1;
+                    
+                    // 重置状态变量以处理下一个注释
+                    onset = false;
+                    duration_start = false;
                     n = 0;
                     k += 1;
                     continue;

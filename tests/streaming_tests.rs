@@ -434,7 +434,7 @@ fn test_streaming_with_annotations() {
     // 流式读取并处理注释
     {
         let mut reader = EdfReader::open(filename).unwrap();
-        let annotations = reader.annotations();
+        let annotations = reader.annotations().to_vec();
         
         println!("Streaming with annotations test:");
         println!("  Found {} annotations", annotations.len());
@@ -464,7 +464,7 @@ fn test_streaming_with_annotations() {
                 .collect();
             
             // 分析窗口数据
-            let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+            let _mean = samples.iter().sum::<f64>() / samples.len() as f64;
             let max_val = samples.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
             let min_val = samples.iter().fold(f64::INFINITY, |a, &b| a.min(b));
             

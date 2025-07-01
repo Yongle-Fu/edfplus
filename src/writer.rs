@@ -1080,11 +1080,11 @@ impl EdfWriter {
             let annotation_time = annotation.onset as f64 / EDFLIB_TIME_DIMENSION as f64;
             
             // 计算所需空间（保守估计）
-            let time_str = format!("{:.6}", annotation_time).trim_end_matches('0').trim_end_matches('.').to_string();
+            let time_str = format!("{:.7}", annotation_time).trim_end_matches('0').trim_end_matches('.').to_string();
             let mut needed_space = 1 + time_str.len() + 2 + annotation.description.len() + 1; // +, time, \x14, description, \x14
             
             if annotation.duration >= 0 {
-                let duration_str = format!("{:.6}", annotation.duration as f64 / EDFLIB_TIME_DIMENSION as f64)
+                let duration_str = format!("{:.7}", annotation.duration as f64 / EDFLIB_TIME_DIMENSION as f64)
                     .trim_end_matches('0').trim_end_matches('.').to_string();
                 needed_space += 1 + duration_str.len(); // \x15 + duration
             }
@@ -1101,7 +1101,7 @@ impl EdfWriter {
             // 添加持续时间（如果指定）
             if annotation.duration >= 0 {
                 tal_data.push(0x15); // ASCII 21 - duration separator
-                let duration_str = format!("{:.6}", annotation.duration as f64 / EDFLIB_TIME_DIMENSION as f64)
+                let duration_str = format!("{:.7}", annotation.duration as f64 / EDFLIB_TIME_DIMENSION as f64)
                     .trim_end_matches('0').trim_end_matches('.').to_string();
                 tal_data.extend_from_slice(duration_str.as_bytes());
             }

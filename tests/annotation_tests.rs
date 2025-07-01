@@ -376,7 +376,7 @@ fn test_annotation_validation() {
         // 测试无效的注释
         assert!(writer.add_annotation(-1.0, None, "Negative onset").is_err());
         assert!(writer.add_annotation(1.0, Some(-1.0), "Negative duration").is_err());
-        assert!(writer.add_annotation(1.0, None, "").is_err()); // 空描述
+        assert!(writer.add_annotation(1.0, None, "").is_err()); // 空描述应该被拒绝
         
         // 测试过长的描述
         let very_long_desc = "x".repeat(600);
