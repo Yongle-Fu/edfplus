@@ -152,6 +152,9 @@ pub struct EdfWriter {
     
     // 注释存储
     annotations: Vec<crate::types::Annotation>,
+
+    // 子秒开始时间
+    starttime_subsecond: i64,
 }
 
 impl EdfWriter {
@@ -234,6 +237,7 @@ impl EdfWriter {
             equipment: "X".to_string(),
             recording_additional: "X".to_string(),
             annotations: Vec::new(),
+            starttime_subsecond: 0,
         })
     }
     
@@ -512,7 +516,7 @@ impl EdfWriter {
         let annotation_samples_per_record = annotation_bytes_per_record / 2; // 每样本2字节
         
         let annotation_signal = SignalParam {
-            label: "EDF Annotations".to_string(),
+            label: "EDF Annotations ".to_string(), // 注意末尾的空格
             samples_in_file: total_datarecords * annotation_samples_per_record as i64,
             physical_max: 1.0,
             physical_min: -1.0,
@@ -527,7 +531,7 @@ impl EdfWriter {
         let total_signals = self.signals.len() + 1; // +1 for annotation
         let header_size = (total_signals + 1) * 256;
         
-        // 写入主头部 (256字节)
+        // 写入主头部 (256字节) - 按照edflib格式
         let mut main_header = vec![0u8; 256];
         
         // 版本 (8字节)
@@ -581,92 +585,7 @@ impl EdfWriter {
         self.file.write_all(&main_header)?;
         
         // 写入信号头部
-        let mut all_signals = self.signals.clone();
-        all_signals.push(annotation_signal);
-        
-        // 每个字段写入所有信号
-        for field_offset in 0..8 {
-            for signal in &all_signals {
-                let mut field_data = vec![0u8; 16];
-                match field_offset {
-                    0 => { // 标签
-                        let label_bytes = signal.label.as_bytes();
-                        let len = label_bytes.len().min(16);
-                        field_data[..len].copy_from_slice(&label_bytes[..len]);
-                    }
-                    1 => { // 传感器
-                        let mut field_data = vec![0u8; 80];
-                        let trans_bytes = signal.transducer.as_bytes();
-                        let len = trans_bytes.len().min(80);
-                        field_data[..len].copy_from_slice(&trans_bytes[..len]);
-                        self.file.write_all(&field_data)?;
-                        continue;
-                    }
-                    2 => { // 物理单位
-                        let mut field_data = vec![0u8; 8];
-                        let unit_bytes = signal.physical_dimension.as_bytes();
-                        let len = unit_bytes.len().min(8);
-                        field_data[..len].copy_from_slice(&unit_bytes[..len]);
-                        self.file.write_all(&field_data)?;
-                        continue;
-                    }
-                    3 => { // 物理最小值
-                        let mut field_data = vec![0u8; 8];
-                        let phys_min_str = format!("{:<8}", signal.physical_min);
-                        field_data.copy_from_slice(phys_min_str.as_bytes());
-                        self.file.write_all(&field_data)?;
-                        continue;
-                    }
-                    4 => { // 物理最大值
-                        let mut field_data = vec![0u8; 8];
-                        let phys_max_str = format!("{:<8}", signal.physical_max);
-                        field_data.copy_from_slice(phys_max_str.as_bytes());
-                        self.file.write_all(&field_data)?;
-                        continue;
-                    }
-                    5 => { // 数字最小值
-                        let mut field_data = vec![0u8; 8];
-                        let dig_min_str = format!("{:<8}", signal.digital_min);
-                        field_data.copy_from_slice(dig_min_str.as_bytes());
-                        self.file.write_all(&field_data)?;
-                        continue;
-                    }
-                    6 => { // 数字最大值
-                        let mut field_data = vec![0u8; 8];
-                        let dig_max_str = format!("{:<8}", signal.digital_max);
-                        field_data.copy_from_slice(dig_max_str.as_bytes());
-                        self.file.write_all(&field_data)?;
-                        continue;
-                    }
-                    7 => { // 预滤波
-                        let mut field_data = vec![0u8; 80];
-                        let prefilter_bytes = signal.prefilter.as_bytes();
-                        let len = prefilter_bytes.len().min(80);
-                        field_data[..len].copy_from_slice(&prefilter_bytes[..len]);
-                        self.file.write_all(&field_data)?;
-                        continue;
-                    }
-                    _ => {}
-                }
-                if field_offset == 0 {
-                    self.file.write_all(&field_data)?;
-                }
-            }
-        }
-        
-        // 每个数据记录的样本数
-        for signal in &all_signals {
-            let mut field_data = vec![0u8; 8];
-            let samples_str = format!("{:<8}", signal.samples_per_record);
-            field_data.copy_from_slice(samples_str.as_bytes());
-            self.file.write_all(&field_data)?;
-        }
-        
-        // 保留字段
-        for _signal in &all_signals {
-            let field_data = vec![0u8; 32];
-            self.file.write_all(&field_data)?;
-        }
+        self.write_signal_headers(&annotation_signal)?;
         
         self.header_written = true;
         Ok(())
@@ -785,7 +704,7 @@ impl EdfWriter {
             return Err(EdfError::InvalidFormat("Sample count must match signal count".to_string()));
         }
         
-        // 验证每个信号的样本数是否与其samples_per_record匹配
+        // 验证每个信号的样本数
         for (i, signal_samples) in samples.iter().enumerate() {
             let expected_samples = self.signals[i].samples_per_record as usize;
             if signal_samples.len() != expected_samples {
@@ -796,13 +715,14 @@ impl EdfWriter {
             }
         }
         
-        // 如果还没写头部，先写头部（估计总记录数为1，实际会在finalize时更新）
+        // 如果还没写头部，先写头部
         if !self.header_written {
-            self.write_header(1)?;
+            self.write_header(1)?; // 临时使用1，会在finalize时更新
         }
         
-        // 写入一个数据记录
-        // 按信号顺序写入所有样本
+        // 按照edflib的顺序写入数据：信号数据 + 注释信号
+    
+        // 写入所有信号的样本数据
         for signal_idx in 0..self.signals.len() {
             let signal = &self.signals[signal_idx];
             let signal_samples = &samples[signal_idx];
@@ -810,17 +730,22 @@ impl EdfWriter {
             for &physical_value in signal_samples {
                 let digital_value = signal.to_digital(physical_value);
                 
-                // 转换为16位小端序
-                let bytes = (digital_value as i16).to_le_bytes();
+                // 应用范围限制
+                let clamped_value = digital_value
+                    .max(signal.digital_min)
+                    .min(signal.digital_max);
+                
+                // 写入为16位小端序
+                let bytes = (clamped_value as i16).to_le_bytes();
                 self.file.write_all(&bytes)?;
             }
         }
         
-        // 写入注释信号的样本 (每个数据记录一个样本)
+        // 写入注释信号的TAL数据
         let annotation_data = self.generate_annotation_tal(self.samples_written)?;
         self.file.write_all(&annotation_data)?;
         
-        self.samples_written += 1; // 增加数据记录计数
+        self.samples_written += 1;
         Ok(())
     }
     
@@ -1102,5 +1027,100 @@ impl EdfWriter {
         // 填充到确切的 120 字节，用零填充
         tal_data.resize(ANNOTATION_BYTES, 0x00);
         Ok(tal_data)
+    }
+
+    // 添加subsecond开始时间支持
+    pub fn set_subsecond_starttime(&mut self, subsecond: i64) -> Result<()> {
+        if self.header_written {
+            return Err(EdfError::InvalidFormat("Cannot modify subsecond start time after writing header".to_string()));
+        }
+        
+        if subsecond < 0 || subsecond >= EDFLIB_TIME_DIMENSION {
+            return Err(EdfError::InvalidFormat("Subsecond must be between 0 and 9999999".to_string()));
+        }
+        
+        self.starttime_subsecond = subsecond;
+        Ok(())
+    }
+
+    fn write_signal_headers(&mut self, annotation_signal: &SignalParam) -> Result<()> {
+        let mut all_signals = self.signals.clone();
+        all_signals.push(annotation_signal.clone());
+        
+        // 按照edflib的字段顺序写入，每个字段所有信号一起写
+    
+        // 1. 标签 (16字节 × 信号数)
+        for signal in &all_signals {
+            let mut field_data = [b' '; 16];
+            let label_bytes = signal.label.as_bytes();
+            let len = label_bytes.len().min(16);
+            field_data[..len].copy_from_slice(&label_bytes[..len]);
+            self.file.write_all(&field_data)?;
+        }
+        
+        // 2. 传感器 (80字节 × 信号数)
+        for signal in &all_signals {
+            let mut field_data = [b' '; 80];
+            let trans_bytes = signal.transducer.as_bytes();
+            let len = trans_bytes.len().min(80);
+            field_data[..len].copy_from_slice(&trans_bytes[..len]);
+            self.file.write_all(&field_data)?;
+        }
+        
+        // 3. 物理单位 (8字节 × 信号数)
+        for signal in &all_signals {
+            let mut field_data = [b' '; 8];
+            let unit_bytes = signal.physical_dimension.as_bytes();
+            let len = unit_bytes.len().min(8);
+            field_data[..len].copy_from_slice(&unit_bytes[..len]);
+            self.file.write_all(&field_data)?;
+        }
+        
+        // 4. 物理最小值 (8字节 × 信号数)
+        for signal in &all_signals {
+            let phys_min_str = format!("{:<8}", signal.physical_min);
+            self.file.write_all(phys_min_str.as_bytes())?;
+        }
+        
+        // 5. 物理最大值 (8字节 × 信号数)
+        for signal in &all_signals {
+            let phys_max_str = format!("{:<8}", signal.physical_max);
+            self.file.write_all(phys_max_str.as_bytes())?;
+        }
+        
+        // 6. 数字最小值 (8字节 × 信号数)
+        for signal in &all_signals {
+            let dig_min_str = format!("{:<8}", signal.digital_min);
+            self.file.write_all(dig_min_str.as_bytes())?;
+        }
+        
+        // 7. 数字最大值 (8字节 × 信号数)
+        for signal in &all_signals {
+            let dig_max_str = format!("{:<8}", signal.digital_max);
+            self.file.write_all(dig_max_str.as_bytes())?;
+        }
+        
+        // 8. 预滤波 (80字节 × 信号数)
+        for signal in &all_signals {
+            let mut field_data = [b' '; 80];
+            let prefilter_bytes = signal.prefilter.as_bytes();
+            let len = prefilter_bytes.len().min(80);
+            field_data[..len].copy_from_slice(&prefilter_bytes[..len]);
+            self.file.write_all(&field_data)?;
+        }
+        
+        // 9. 每记录样本数 (8字节 × 信号数)
+        for signal in &all_signals {
+            let samples_str = format!("{:<8}", signal.samples_per_record);
+            self.file.write_all(samples_str.as_bytes())?;
+        }
+        
+        // 10. 保留字段 (32字节 × 信号数)
+        for _signal in &all_signals {
+            let field_data = [b' '; 32];
+            self.file.write_all(&field_data)?;
+        }
+        
+        Ok(())
     }
 }
