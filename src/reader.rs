@@ -1015,12 +1015,13 @@ impl EdfReader {
         Ok(None)
     }
     
+
     /// Parses TAL data from a byte buffer following edflib implementation
     /// 
     /// TAL format: "+<onset>[\x15<duration>]\x14<description>\x14"
     /// 
     /// This closely follows the edflib_get_annotations logic for parsing TAL data.
-    fn parse_tal_data(&self, data: &[u8], record_idx: usize, is_first_annotation_signal: bool) -> Result<Vec<Annotation>> {
+    fn parse_tal_data(&self, data: &[u8], _record_idx: usize, is_first_annotation_signal: bool) -> Result<Vec<Annotation>> {
         let mut annotations = Vec::new();
         let max = data.len();
         
@@ -1028,7 +1029,6 @@ impl EdfReader {
             return Ok(annotations);
         }
         
-        // 基于edflib实现的完整TAL解析
         let mut k = 0;
         let mut onset = false;
         let mut duration = false;
@@ -1078,40 +1078,47 @@ impl EdfReader {
                 }
                 
                 if byte == 20 && onset && !duration_start {
-                    // 描述字段结束
-                    if is_first_annotation_signal && record_idx == 0 && annots_in_record == 0 {
-                        // 跳过第一个时间戳验证注释
-                    } else if annots_in_record > 0 || !is_first_annotation_signal {
-                        // 创建注释
-                        if n > 0 {
-                            let description = String::from_utf8_lossy(&scratchpad[0..n]).to_string();
+                    // 描述字段结束 - 检查是否应该创建注释
+                    let description = if n > 0 {
+                        String::from_utf8_lossy(&scratchpad[0..n]).to_string()
+                    } else {
+                        String::new()
+                    };
+                    
+                    // 根据EDF+标准，时间戳注释（timestamp annotations）有空描述
+                    // 且通常在每个数据记录的开头。用户注释即使描述为空也应该保留
+                    let is_timestamp_annotation = is_first_annotation_signal && 
+                                                   annots_in_record == 0 && 
+                                                   description.is_empty();
+                    
+                    if !is_timestamp_annotation {
+                        let time_str = String::from_utf8_lossy(&time_in_txt)
+                            .trim_end_matches('\0').to_string();
+                        
+                        if let Ok(onset_seconds) = time_str.parse::<f64>() {
+                            // 计算绝对时间戳
+                            let onset_time = (onset_seconds * EDFLIB_TIME_DIMENSION as f64) as i64;
                             
-                            if !description.is_empty() {
-                                let time_str = String::from_utf8_lossy(&time_in_txt)
+                            // 从注释时间戳中减去文件的 starttime_offset（类似 edflib）
+                            let adjusted_onset = onset_time - self.header.starttime_subsecond;
+                            
+                            let duration_time = if duration {
+                                let duration_str = String::from_utf8_lossy(&duration_in_txt)
                                     .trim_end_matches('\0').to_string();
-                                
-                                if let Ok(onset_seconds) = time_str.parse::<f64>() {
-                                    let onset_time = (onset_seconds * EDFLIB_TIME_DIMENSION as f64) as i64;
-                                    
-                                    let duration_time = if duration {
-                                        let duration_str = String::from_utf8_lossy(&duration_in_txt)
-                                            .trim_end_matches('\0').to_string();
-                                        if let Ok(duration_seconds) = duration_str.parse::<f64>() {
-                                            (duration_seconds * EDFLIB_TIME_DIMENSION as f64) as i64
-                                        } else {
-                                            -1
-                                        }
-                                    } else {
-                                        -1
-                                    };
-                                    
-                                    annotations.push(Annotation {
-                                        onset: onset_time,
-                                        duration: duration_time,
-                                        description,
-                                    });
+                                if let Ok(duration_seconds) = duration_str.parse::<f64>() {
+                                    (duration_seconds * EDFLIB_TIME_DIMENSION as f64) as i64
+                                } else {
+                                    -1
                                 }
-                            }
+                            } else {
+                                -1
+                            };
+                            
+                            annotations.push(Annotation {
+                                onset: adjusted_onset,
+                                duration: duration_time,
+                                description,
+                            });
                         }
                     }
                     
@@ -1132,7 +1139,7 @@ impl EdfReader {
                         break;
                     }
                     
-                    // 复制onset时间 - 修复借用检查问题
+                    // 复制onset时间
                     let copy_len = n.min(time_in_txt.len() - 1);
                     time_in_txt[..copy_len].copy_from_slice(&scratchpad[..copy_len]);
                     time_in_txt[copy_len] = 0;
@@ -1153,7 +1160,7 @@ impl EdfReader {
                         break;
                     }
                     
-                    // 复制duration - 修复借用检查问题
+                    // 复制duration
                     let copy_len = n.min(duration_in_txt.len() - 1);
                     duration_in_txt[..copy_len].copy_from_slice(&scratchpad[..copy_len]);
                     duration_in_txt[copy_len] = 0;
@@ -1184,30 +1191,31 @@ impl EdfReader {
         Ok(annotations)
     }
 
+
+
     // 添加辅助验证函数
     fn is_valid_onset(s: &str) -> bool {
-        if s.len() < 2 {
+        if s.is_empty() {
             return false;
         }
         
+        // 注意：此时onset字符串已经不包含前导的'+'号了
         let chars: Vec<char> = s.chars().collect();
         
-        if chars[0] != '+' && chars[0] != '-' {
+        // 检查是否以'.'开始或结束
+        if chars[0] == '.' || chars[chars.len() - 1] == '.' {
             return false;
         }
         
-        if chars[1] == '.' || chars[chars.len() - 1] == '.' {
-            return false;
-        }
-        
+        // 验证所有字符都是数字或小数点
         let mut has_dot = false;
-        for i in 1..chars.len() {
-            if chars[i] == '.' {
+        for ch in chars {
+            if ch == '.' {
                 if has_dot {
-                    return false;
+                    return false; // 不能有多个小数点
                 }
                 has_dot = true;
-            } else if !chars[i].is_ascii_digit() {
+            } else if !ch.is_ascii_digit() {
                 return false;
             }
         }
@@ -1276,7 +1284,7 @@ impl EdfReader {
             reader.read_exact(&mut record_data)?;
             
             // 处理每个注释信号
-            for &ann_signal_idx in &annotation_signals {
+            for (ann_idx, &ann_signal_idx) in annotation_signals.iter().enumerate() {
                 let ann_info = &signal_info[ann_signal_idx];
                 
                 // 使用预计算的buffer_offset而不是重新计算
@@ -1287,8 +1295,12 @@ impl EdfReader {
                 if signal_offset + bytes_to_read <= record_data.len() {
                     let tal_data = &record_data[signal_offset..signal_offset + bytes_to_read];
                     
-                    // 解析TAL数据以计算注释
-                    let (record_annotations, subsecond) = Self::quick_parse_tal_for_count(tal_data, record_idx == 0)?;
+                    // 解析TAL数据以计算注释 - 传递正确的注释信号索引
+                    let (record_annotations, subsecond) = Self::quick_parse_tal_for_count(
+                        tal_data, 
+                        record_idx == 0,
+                        ann_idx == 0  // 只有第一个注释信号才是 true
+                    )?;
                     annotation_count += record_annotations;
                     
                     // 第一个记录可能包含subsecond信息
@@ -1301,9 +1313,9 @@ impl EdfReader {
         
         Ok((annotation_count, starttime_subsecond))
     }
-    
+
     /// 快速解析TAL数据仅用于计算注释数量和提取subsecond信息
-    fn quick_parse_tal_for_count(data: &[u8], is_first_record: bool) -> Result<(i64, i64)> {
+    fn quick_parse_tal_for_count(data: &[u8], is_first_record: bool, is_first_annotation_signal: bool) -> Result<(i64, i64)> {
         let mut count = 0i64;
         let mut subsecond = 0i64;
         let max = data.len();
@@ -1313,28 +1325,115 @@ impl EdfReader {
         }
         
         let mut k = 0;
-        let mut in_description = false;
-        let mut skip_first = is_first_record; // 第一个记录的第一个注释是时间戳，要跳过
+        let mut onset = false;
+        let mut duration_start = false;
+        let mut n = 0;
+        let mut scratchpad = vec![0u8; max + 16];
+        let mut zero = 0;
+        let mut annots_in_tal = 0;
+        let mut annots_in_record = 0;
         
         while k < max - 1 {
             let byte = data[k];
             
             if byte == 0 {
-                break;
+                if zero == 0 {
+                    if k > 0 && data[k - 1] != 20 {
+                        // 格式错误：null字节前应该是分隔符
+                        break;
+                    }
+                    n = 0;
+                    onset = false;
+                    duration_start = false;
+                    scratchpad.fill(0);
+                    annots_in_tal = 0;
+                }
+                zero += 1;
+                k += 1;
+                continue;
             }
             
-            if byte == 20 { // 0x14 - TAL separator
-                if in_description {
-                    // 发现了一个注释描述的结束
-                    if skip_first {
-                        skip_first = false; // 跳过第一个时间戳注释
+            if zero > 1 {
+                // 格式错误：连续的null字节太多
+                break;
+            }
+            zero = 0;
+            
+            // 处理TAL分隔符
+            if byte == 20 || byte == 21 { // 0x14 (20) 或 0x15 (21)
+                if byte == 21 { // Duration分隔符
+                    if duration_start || onset || annots_in_tal > 0 {
+                        break; // 不允许多个duration字段或位置错误
+                    }
+                    duration_start = true;
+                }
+                
+                if byte == 20 && onset && !duration_start {
+                    // 描述字段结束 - 检查是否应该计数这个注释
+                    let description = if n > 0 {
+                        String::from_utf8_lossy(&scratchpad[0..n]).to_string()
                     } else {
+                        String::new()
+                    };
+                    
+                    // 与parse_tal_data使用相同的逻辑判断时间戳注释
+                    let is_timestamp_annotation = is_first_annotation_signal && 
+                                                   annots_in_record == 0 && 
+                                                   description.is_empty();
+                    
+                    if !is_timestamp_annotation {
                         count += 1;
                     }
-                    in_description = false;
-                } else {
-                    // 时间戳结束，进入描述
-                    in_description = true;
+                    
+                    annots_in_tal += 1;
+                    annots_in_record += 1;
+                    n = 0;
+                    k += 1;
+                    continue;
+                }
+                
+                if !onset {
+                    // Onset字段结束
+                    scratchpad[n] = 0;
+                    
+                    // 验证onset格式
+                    let onset_str = String::from_utf8_lossy(&scratchpad[0..n]);
+                    if !Self::is_valid_onset(&onset_str) {
+                        break;
+                    }
+                    
+                    onset = true;
+                    n = 0;
+                    k += 1;
+                    continue;
+                }
+                
+                if duration_start {
+                    // Duration字段结束
+                    scratchpad[n] = 0;
+                    
+                    // 验证duration格式
+                    let duration_str = String::from_utf8_lossy(&scratchpad[0..n]);
+                    if !Self::is_valid_duration(&duration_str) {
+                        break;
+                    }
+                    
+                    duration_start = false;
+                    n = 0;
+                    k += 1;
+                    continue;
+                }
+            } else {
+                // 常规字符
+                if byte == b'+' && !onset && n == 0 {
+                    // 跳过onset前的'+'号，但不存储
+                    k += 1;
+                    continue;
+                }
+                
+                if n < scratchpad.len() - 1 {
+                    scratchpad[n] = byte;
+                    n += 1;
                 }
             }
             
