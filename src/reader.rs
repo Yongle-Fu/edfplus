@@ -526,13 +526,20 @@ impl EdfReader {
         
         let mut samples = Vec::with_capacity(actual_count);
         let mut samples_read = 0;
+        let current_pos = self.sample_positions[signal];
         
+        // ✅ 性能优化：使用类似 edflib 的直接计算方式
         while samples_read < actual_count {
-            let current_pos = self.sample_positions[signal];
-            let record_index = current_pos / signal_param.samples_per_record as i64;
-            let sample_in_record = current_pos % signal_param.samples_per_record as i64;
+            let pos = current_pos + samples_read as i64;
+            let record_index = pos / signal_param.samples_per_record as i64;
+            let sample_in_record = pos % signal_param.samples_per_record as i64;
             
-            // 计算文件偏移量
+            // 计算连续可读取的样本数（避免跨记录）
+            let samples_remaining_in_record = 
+                (signal_param.samples_per_record as i64 - sample_in_record) as usize;
+            let samples_to_read = (actual_count - samples_read).min(samples_remaining_in_record);
+            
+            // ✅ 使用预计算的 buffer_offset 直接定位
             let file_offset = self.header_size as u64 
                 + record_index as u64 * self.record_size as u64
                 + signal_info.buffer_offset as u64
@@ -541,19 +548,16 @@ impl EdfReader {
             // 定位到正确位置
             self.file.seek(SeekFrom::Start(file_offset))?;
             
-            // 计算在当前记录中可以读取的样本数
-            let samples_in_current_record = (signal_param.samples_per_record as i64 - sample_in_record) as usize;
-            let samples_to_read = (actual_count - samples_read).min(samples_in_current_record);
+            // ✅ 批量读取以提高性能
+            let bytes_to_read = samples_to_read * 2;
+            let mut buffer = vec![0u8; bytes_to_read];
+            self.file.read_exact(&mut buffer)?;
             
-            // 读取样本
-            for _ in 0..samples_to_read {
-                let mut buf = [0u8; 2];
-                self.file.read_exact(&mut buf)?;
+            // 转换字节到数字值并应用范围限制
+            for chunk in buffer.chunks_exact(2) {
+                let digital_value = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
                 
-                // 转换为有符号16位整数（小端序）
-                let digital_value = i16::from_le_bytes(buf) as i32;
-                
-                // 应用数字范围限制
+                // ✅ 应用数字范围限制（类似 edflib 的 clamping）
                 let clamped_value = digital_value
                     .max(signal_param.digital_min)
                     .min(signal_param.digital_max);
@@ -565,10 +569,10 @@ impl EdfReader {
                     break;
                 }
             }
-            
-            // 更新样本位置
-            self.sample_positions[signal] = current_pos + samples_to_read as i64;
         }
+        
+        // 更新样本位置
+        self.sample_positions[signal] = current_pos + samples_read as i64;
         
         Ok(samples)
     }
@@ -822,8 +826,9 @@ impl EdfReader {
             );
             let samples_per_record = atoi_nonlocalized(&samples_str);
             
+            // 创建 SignalInfo - 所有信号都要设置正确的 buffer_offset
             let info = SignalInfo {
-                buffer_offset,
+                buffer_offset,  // 当前累计的字节偏移
                 samples_per_record,
                 is_annotation,
             };
@@ -854,9 +859,11 @@ impl EdfReader {
                 signals.push(signal_param);
             }
             
+            // 将信号信息添加到列表（包括注释信号）
             signal_info.push(info);
             
-            // 更新缓冲区偏移（每个样本2字节，包括注释信号）
+            // ✅ 关键修复：为所有信号（包括注释信号）更新 buffer_offset
+            // 每个样本占用 2 字节（EDF 格式固定）
             buffer_offset += samples_per_record as usize * 2;
         }
         

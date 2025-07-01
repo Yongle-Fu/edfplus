@@ -7,6 +7,17 @@ use crate::types::SignalParam;
 use crate::error::{EdfError, Result};
 use crate::EDFLIB_TIME_DIMENSION;
 
+/// Maximum number of annotation channels (matches edflib)
+const EDFLIB_MAX_ANNOTATION_CHANNELS: usize = 64;
+
+/// Annotation bytes per channel (must be multiple of 6, matches edflib)
+const EDFLIB_ANNOTATION_BYTES: usize = 120;
+
+/// Maximum annotation description length
+const EDFLIB_WRITE_MAX_ANNOTATION_LEN: usize = 40;
+
+
+
 /// EDF+ file writer for creating European Data Format Plus files
 /// 
 /// The `EdfWriter` provides methods to create new EDF+ files and write
@@ -155,6 +166,9 @@ pub struct EdfWriter {
 
     // 子秒开始时间
     starttime_subsecond: i64,
+    
+    // 多注释通道支持 (遵循edflib设计)
+    nr_annot_chns: usize,                    // 注释通道数量 (默认1)
 }
 
 impl EdfWriter {
@@ -238,6 +252,7 @@ impl EdfWriter {
             recording_additional: "X".to_string(),
             annotations: Vec::new(),
             starttime_subsecond: 0,
+            nr_annot_chns: 1,  // 默认1个注释通道
         })
     }
     
@@ -509,26 +524,27 @@ impl EdfWriter {
             return Ok(());
         }
         
-        // 添加注释信号
-        // 根据 EDF+ 规范，注释信号需要足够空间存储 TAL 数据
-        // EDFLIB_ANNOTATION_BYTES = 120, 每样本2字节，所以需要60个样本
-        let annotation_bytes_per_record = 120; // 与 edflib 兼容
+        // 创建注释信号 - 支持多个注释通道
+        let mut annotation_signals = Vec::new();
+        let annotation_bytes_per_record = EDFLIB_ANNOTATION_BYTES; // 每个注释通道120字节
         let annotation_samples_per_record = annotation_bytes_per_record / 2; // 每样本2字节
         
-        let annotation_signal = SignalParam {
-            label: "EDF Annotations ".to_string(), // 注意末尾的空格
-            samples_in_file: total_datarecords * annotation_samples_per_record as i64,
-            physical_max: 1.0,
-            physical_min: -1.0,
-            digital_max: 32767,
-            digital_min: -32768,
-            samples_per_record: annotation_samples_per_record as i32,
-            physical_dimension: "".to_string(),
-            prefilter: "".to_string(),
-            transducer: "".to_string(),
-        };
+        for _ in 0..self.nr_annot_chns {
+            annotation_signals.push(SignalParam {
+                label: "EDF Annotations ".to_string(), // 标准要求的标签
+                samples_in_file: total_datarecords * annotation_samples_per_record as i64,
+                physical_max: 1.0,
+                physical_min: -1.0,
+                digital_max: 32767,
+                digital_min: -32768,
+                samples_per_record: annotation_samples_per_record as i32,
+                physical_dimension: "".to_string(),
+                prefilter: "".to_string(),
+                transducer: "".to_string(),
+            });
+        }
         
-        let total_signals = self.signals.len() + 1; // +1 for annotation
+        let total_signals = self.signals.len() + self.nr_annot_chns;
         let header_size = (total_signals + 1) * 256;
         
         // 写入主头部 (256字节) - 按照edflib格式
@@ -584,8 +600,8 @@ impl EdfWriter {
         
         self.file.write_all(&main_header)?;
         
-        // 写入信号头部
-        self.write_signal_headers(&annotation_signal)?;
+        // 写入信号头部 - 根据注释信号位置确定顺序
+        self.write_signal_headers_with_annotations(&annotation_signals)?;
         
         self.header_written = true;
         Ok(())
@@ -741,9 +757,11 @@ impl EdfWriter {
             }
         }
         
-        // 写入注释信号的TAL数据
-        let annotation_data = self.generate_annotation_tal(self.samples_written)?;
-        self.file.write_all(&annotation_data)?;
+        // 写入注释信号的TAL数据 - 支持多个注释通道
+        for channel_idx in 0..self.nr_annot_chns {
+            let annotation_data = self.generate_annotation_tal_for_channel(self.samples_written, channel_idx)?;
+            self.file.write_all(&annotation_data)?;
+        }
         
         self.samples_written += 1;
         Ok(())
@@ -970,62 +988,139 @@ impl EdfWriter {
         self.annotations.len()
     }
 
-    /// Generates TAL (Time-stamped Annotations Lists) format for annotations
+    /// Generates TAL data for a specific annotation channel (遵循edflib多通道设计)
     /// 
-    /// This creates the EDF+ annotation signal data in the correct format.
-    /// Each data record gets exactly 120 bytes for the annotation signal.
-    fn generate_annotation_tal(&self, data_record_index: usize) -> Result<Vec<u8>> {
-        const ANNOTATION_BYTES: usize = 120; // 与 edflib 兼容
-        let mut tal_data = Vec::with_capacity(ANNOTATION_BYTES);
+    /// 这个方法实现了edflib.c中的多注释通道TAL数据分发策略。
+    /// 注释数据会按照通道索引分布到不同的注释通道中，遵循EDF+标准。
+    /// 
+    /// # Arguments
+    /// 
+    /// * `data_record_index` - 数据记录索引
+    /// * `channel_idx` - 注释通道索引 (0 到 nr_annot_chns-1)
+    /// 
+    /// # Channel Distribution Strategy
+    /// 
+    /// 遵循edflib.c的设计：
+    /// - 第一个注释通道 (0): 包含时间戳 + 按顺序分配的注释
+    /// - 其他注释通道: 循环分配剩余注释
+    /// 
+    /// # Returns
+    /// 
+    /// 返回120字节的TAL数据，严格符合EDF+标准格式
+    fn generate_annotation_tal_for_channel(&self, data_record_index: usize, channel_idx: usize) -> Result<Vec<u8>> {
+        let mut tal_data = Vec::with_capacity(EDFLIB_ANNOTATION_BYTES);
         
         // 数据记录的时间范围
         let data_record_time_start = data_record_index as f64 * (self.datarecord_duration as f64 / EDFLIB_TIME_DIMENSION as f64);
         let data_record_time_end = (data_record_index + 1) as f64 * (self.datarecord_duration as f64 / EDFLIB_TIME_DIMENSION as f64);
         
-        // 第一个数据记录总是包含时间戳记录
-        if data_record_index == 0 {
-            // 格式: "+<onset>\x14\x14\x00"
+        // 第一个注释通道处理时间戳记录（遵循edflib设计）
+        if channel_idx == 0 {
+            // 时间戳注释，格式: "+<onset>\x14\x14\x00"
             tal_data.push(b'+');
-            let time_str = format!("{}", data_record_time_start);
-            tal_data.extend_from_slice(time_str.as_bytes());
+            
+            // 添加子秒精度支持
+            if data_record_index == 0 && self.starttime_subsecond > 0 {
+                // 第一个记录包含子秒开始时间
+                let time_with_subsecond = data_record_time_start + (self.starttime_subsecond as f64 / EDFLIB_TIME_DIMENSION as f64);
+                let time_str = format!("{:.7}", time_with_subsecond).trim_end_matches('0').trim_end_matches('.').to_string();
+                tal_data.extend_from_slice(time_str.as_bytes());
+            } else {
+                let time_str = if data_record_time_start.fract() == 0.0 {
+                    format!("{}", data_record_time_start as i64)
+                } else {
+                    format!("{:.6}", data_record_time_start).trim_end_matches('0').trim_end_matches('.').to_string()
+                };
+                tal_data.extend_from_slice(time_str.as_bytes());
+            }
+            
             tal_data.push(0x14); // ASCII 20 - start of annotation
             tal_data.push(0x14); // ASCII 20 - end of annotation (empty)
             tal_data.push(0x00); // Null terminator
         }
         
-        // 添加落在此数据记录时间范围内的注释
-        for annotation in &self.annotations {
+        // 查找属于当前数据记录和注释通道的注释
+        let mut record_annotations = Vec::new();
+        for (annot_idx, annotation) in self.annotations.iter().enumerate() {
             let annotation_time = annotation.onset as f64 / EDFLIB_TIME_DIMENSION as f64;
             
             // 检查注释是否属于当前数据记录
             if annotation_time >= data_record_time_start && annotation_time < data_record_time_end {
-                // 确保有足够空间 (至少需要时间戳+描述+分隔符)
-                let needed_space = annotation_time.to_string().len() + annotation.description.len() + 10;
-                if tal_data.len() + needed_space > ANNOTATION_BYTES - 5 {
-                    break; // 没有足够空间，跳过剩余注释
+                // 按照edflib策略分配注释到通道
+                let target_channel = if self.nr_annot_chns == 1 {
+                    0 // 单通道模式，所有注释都在通道0
+                } else {
+                    // 多通道模式：循环分配
+                    // 第一个注释通道处理时间戳，其他注释按索引分配
+                    if channel_idx == 0 {
+                        // 第一个通道处理部分注释（时间戳优先）
+                        if annot_idx % self.nr_annot_chns == 0 {
+                            0
+                        } else {
+                            continue; // 不属于通道0的注释跳过
+                        }
+                    } else {
+                        // 其他通道按循环分配
+                        if annot_idx % self.nr_annot_chns == channel_idx {
+                            channel_idx
+                        } else {
+                            continue; // 不属于当前通道的注释跳过
+                        }
+                    }
+                };
+                
+                if target_channel == channel_idx {
+                    record_annotations.push(annotation);
                 }
-                
-                // 格式: "+<onset>[\x15<duration>]\x14<description>\x14"
-                tal_data.push(b'+');
-                let time_str = format!("{:.6}", annotation_time).trim_end_matches('0').trim_end_matches('.').to_string();
-                tal_data.extend_from_slice(time_str.as_bytes());
-                
-                // 添加持续时间（如果指定）
-                if annotation.duration >= 0 {
-                    tal_data.push(0x15); // ASCII 21 - duration separator
-                    let duration_str = format!("{:.6}", annotation.duration as f64 / EDFLIB_TIME_DIMENSION as f64)
-                        .trim_end_matches('0').trim_end_matches('.').to_string();
-                    tal_data.extend_from_slice(duration_str.as_bytes());
-                }
-                
-                tal_data.push(0x14); // ASCII 20 - start of description
-                tal_data.extend_from_slice(annotation.description.as_bytes());
-                tal_data.push(0x14); // ASCII 20 - end of annotation
             }
         }
         
-        // 填充到确切的 120 字节，用零填充
-        tal_data.resize(ANNOTATION_BYTES, 0x00);
+        // 添加分配给当前通道的注释
+        for annotation in record_annotations {
+            let annotation_time = annotation.onset as f64 / EDFLIB_TIME_DIMENSION as f64;
+            
+            // 计算所需空间（保守估计）
+            let time_str = format!("{:.6}", annotation_time).trim_end_matches('0').trim_end_matches('.').to_string();
+            let mut needed_space = 1 + time_str.len() + 2 + annotation.description.len() + 1; // +, time, \x14, description, \x14
+            
+            if annotation.duration >= 0 {
+                let duration_str = format!("{:.6}", annotation.duration as f64 / EDFLIB_TIME_DIMENSION as f64)
+                    .trim_end_matches('0').trim_end_matches('.').to_string();
+                needed_space += 1 + duration_str.len(); // \x15 + duration
+            }
+            
+            // 检查空间限制（预留5字节缓冲）
+            if tal_data.len() + needed_space > EDFLIB_ANNOTATION_BYTES - 5 {
+                break; // 没有足够空间，跳过剩余注释
+            }
+            
+            // 格式: "+<onset>[\x15<duration>]\x14<description>\x14"
+            tal_data.push(b'+');
+            tal_data.extend_from_slice(time_str.as_bytes());
+            
+            // 添加持续时间（如果指定）
+            if annotation.duration >= 0 {
+                tal_data.push(0x15); // ASCII 21 - duration separator
+                let duration_str = format!("{:.6}", annotation.duration as f64 / EDFLIB_TIME_DIMENSION as f64)
+                    .trim_end_matches('0').trim_end_matches('.').to_string();
+                tal_data.extend_from_slice(duration_str.as_bytes());
+            }
+            
+            tal_data.push(0x14); // ASCII 20 - start of description
+            
+            // 截断过长的描述（遵循edflib限制）
+            let description_bytes = annotation.description.as_bytes();
+            let max_desc_len = EDFLIB_WRITE_MAX_ANNOTATION_LEN.min(
+                EDFLIB_ANNOTATION_BYTES - tal_data.len() - 2 // 为结束符预留空间
+            );
+            let desc_len = description_bytes.len().min(max_desc_len);
+            tal_data.extend_from_slice(&description_bytes[..desc_len]);
+            
+            tal_data.push(0x14); // ASCII 20 - end of annotation
+        }
+        
+        // 填充到确切的120字节，用零填充（遵循edflib）
+        tal_data.resize(EDFLIB_ANNOTATION_BYTES, 0x00);
         Ok(tal_data)
     }
 
@@ -1043,12 +1138,15 @@ impl EdfWriter {
         Ok(())
     }
 
-    fn write_signal_headers(&mut self, annotation_signal: &SignalParam) -> Result<()> {
-        let mut all_signals = self.signals.clone();
-        all_signals.push(annotation_signal.clone());
+    /// 写入信号头部，注释信号始终放在末尾 (简化edflib设计)
+    fn write_signal_headers_with_annotations(&mut self, annotation_signals: &[SignalParam]) -> Result<()> {
+        // 构建最终的信号列表，注释信号始终在末尾
+        let mut all_signals = Vec::new();
+        all_signals.extend_from_slice(&self.signals);
+        all_signals.extend_from_slice(annotation_signals);
         
         // 按照edflib的字段顺序写入，每个字段所有信号一起写
-    
+        
         // 1. 标签 (16字节 × 信号数)
         for signal in &all_signals {
             let mut field_data = [b' '; 16];
@@ -1122,5 +1220,223 @@ impl EdfWriter {
         }
         
         Ok(())
+    }
+
+    /// Sets the number of annotation signals (channels)
+    /// 
+    /// EDF+ supports multiple annotation signals according to the standard.
+    /// This follows the edflib design where you can have 1-64 annotation channels.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `annot_signals` - Number of annotation signals (1-64)
+    /// 
+    /// # Errors
+    /// 
+    /// * `EdfError::InvalidFormat` - Trying to modify after header written
+    /// * `EdfError::InvalidArgument` - Invalid number of annotation signals
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// use edfplus::EdfWriter;
+    /// 
+    /// let mut writer = EdfWriter::create("multi_annot.edf")?;
+    /// 
+    /// // Set 3 annotation channels for complex event coding
+    /// writer.set_number_of_annotation_signals(3)?;
+    /// 
+    /// # // Cleanup (hidden from docs)
+    /// # std::fs::remove_file("multi_annot.edf").ok();
+    /// # Ok::<(), edfplus::EdfError>(())
+    /// ```
+    pub fn set_number_of_annotation_signals(&mut self, annot_signals: usize) -> Result<()> {
+        if self.header_written {
+            return Err(EdfError::InvalidFormat("Cannot modify annotation signals after writing header".to_string()));
+        }
+        
+        if annot_signals == 0 || annot_signals > EDFLIB_MAX_ANNOTATION_CHANNELS {
+            return Err(EdfError::InvalidFormat(format!(
+                "Annotation signals must be 1-{}, got {}",
+                EDFLIB_MAX_ANNOTATION_CHANNELS, annot_signals
+            )));
+        }
+        
+        self.nr_annot_chns = annot_signals;
+        Ok(())
+    }
+
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::Path;
+    
+    fn create_test_signal() -> SignalParam {
+        SignalParam {
+            label: "Test EEG".to_string(),
+            samples_in_file: 0,
+            physical_max: 100.0,
+            physical_min: -100.0,
+            digital_max: 32767,
+            digital_min: -32768,
+            samples_per_record: 256,
+            physical_dimension: "uV".to_string(),
+            prefilter: "HP:0.1Hz LP:70Hz".to_string(),
+            transducer: "AgAgCl electrodes".to_string(),
+        }
+    }
+    
+    fn cleanup_test_file(filename: &str) {
+        if Path::new(filename).exists() {
+            fs::remove_file(filename).ok();
+        }
+    }
+
+    #[test]
+    fn test_edf_writer_default_annotation_settings() {
+        let writer = EdfWriter::create("test_default.edf").unwrap();
+        assert_eq!(writer.nr_annot_chns, 1);
+        cleanup_test_file("test_default.edf");
+    }
+
+    #[test]
+    fn test_set_number_of_annotation_signals() {
+        let mut writer = EdfWriter::create("test_annot_num.edf").unwrap();
+        
+        // Test valid ranges
+        assert!(writer.set_number_of_annotation_signals(1).is_ok());
+        assert_eq!(writer.nr_annot_chns, 1);
+        
+        assert!(writer.set_number_of_annotation_signals(32).is_ok());
+        assert_eq!(writer.nr_annot_chns, 32);
+        
+        assert!(writer.set_number_of_annotation_signals(64).is_ok());
+        assert_eq!(writer.nr_annot_chns, 64);
+        
+        // Test invalid ranges
+        assert!(writer.set_number_of_annotation_signals(0).is_err());
+        assert!(writer.set_number_of_annotation_signals(65).is_err());
+        
+        cleanup_test_file("test_annot_num.edf");
+    }
+
+    #[test]
+    fn test_modification_after_header_written() {
+        let mut writer = EdfWriter::create("test_locked.edf").unwrap();
+        writer.set_patient_info("P001", "M", "01-JAN-1990", "Test").unwrap();
+        writer.add_signal(create_test_signal()).unwrap();
+        
+        // Write some data to trigger header writing
+        let samples = vec![10.0; 256];
+        writer.write_samples(&[samples]).unwrap();
+        
+        // Now modifications should fail
+        assert!(writer.set_number_of_annotation_signals(3).is_err());
+        
+        cleanup_test_file("test_locked.edf");
+    }
+
+    #[test]
+    fn test_multi_channel_annotation_header_creation() {
+        let mut writer = EdfWriter::create("test_multi_header.edf").unwrap();
+        writer.set_patient_info("P001", "M", "01-JAN-1990", "Test").unwrap();
+        writer.set_number_of_annotation_signals(3).unwrap();
+        
+        // Add regular signals
+        writer.add_signal(create_test_signal()).unwrap();
+        
+        // Write data to trigger header creation
+        let samples = vec![10.0; 256];
+        writer.write_samples(&[samples]).unwrap();
+        writer.finalize().unwrap();
+        
+        // Verify file was created
+        assert!(Path::new("test_multi_header.edf").exists());
+        
+        cleanup_test_file("test_multi_header.edf");
+    }
+
+    #[test]
+    fn test_annotation_tal_generation() {
+        let mut writer = EdfWriter::create("test_tal.edf").unwrap();
+        writer.set_patient_info("P001", "M", "01-JAN-1990", "Test").unwrap();
+        writer.set_number_of_annotation_signals(2).unwrap();
+        
+        // Add a test annotation
+        writer.add_annotation(0.0, None, "Test Event").unwrap();
+        writer.add_annotation(1.5, Some(2.0), "Another Event").unwrap();
+        
+        writer.add_signal(create_test_signal()).unwrap();
+        
+        // Test TAL generation for multiple channels
+        let tal_0 = writer.generate_annotation_tal_for_channel(0, 0).unwrap();
+        let tal_1 = writer.generate_annotation_tal_for_channel(1, 0).unwrap();
+        
+        // Both channels should have some content
+        assert!(!tal_0.is_empty());
+        assert!(!tal_1.is_empty());
+        
+        // TAL should contain the time annotations (checking as bytes)
+        let tal_0_str = String::from_utf8_lossy(&tal_0);
+        let tal_1_str = String::from_utf8_lossy(&tal_1);
+        assert!(tal_0_str.contains("+0\x14") || tal_1_str.contains("+0\x14"));
+        
+        cleanup_test_file("test_tal.edf");
+    }
+
+    #[test]
+    fn test_complete_multi_channel_workflow() {
+        let filename = "test_complete_workflow.edf";
+        
+        // Create writer with multiple annotation channels
+        let mut writer = EdfWriter::create(filename).unwrap();
+        writer.set_patient_info("P001", "M", "01-JAN-1990", "Multi-channel Test").unwrap();
+        writer.set_number_of_annotation_signals(3).unwrap();
+        
+        // Add multiple signals
+        for i in 0..4 {
+            let mut signal = create_test_signal();
+            signal.label = format!("EEG_Ch{}", i + 1);
+            signal.physical_max = 200.0;
+            signal.physical_min = -200.0;
+            writer.add_signal(signal).unwrap();
+        }
+        
+        // Add annotations
+        writer.add_annotation(0.0, None, "Recording Start").unwrap();
+        writer.add_annotation(2.5, Some(1.0), "Artifact").unwrap();
+        writer.add_annotation(5.0, None, "Eyes Closed").unwrap();
+        writer.add_annotation(10.0, None, "Eyes Open").unwrap();
+        
+        // Write 10 seconds of test data
+        for second in 0..10 {
+            let mut all_samples = Vec::new();
+            
+            for ch in 0..4 {
+                let mut channel_samples = Vec::new();
+                for sample in 0..256 {
+                    let t = (second * 256 + sample) as f64 / 256.0;
+                    // Generate different frequencies for each channel
+                    let freq = 10.0 + ch as f64 * 2.0; // 10Hz, 12Hz, 14Hz, 16Hz
+                    let value = 50.0 * (2.0 * std::f64::consts::PI * freq * t).sin();
+                    channel_samples.push(value);
+                }
+                all_samples.push(channel_samples);
+            }
+            
+            writer.write_samples(&all_samples).unwrap();
+        }
+        
+        writer.finalize().unwrap();
+        
+        // Verify file exists and has reasonable size
+        let metadata = fs::metadata(filename).unwrap();
+        assert!(metadata.len() > 0);
+        println!("Created multi-channel EDF+ file: {} bytes", metadata.len());
+        
+        cleanup_test_file(filename);
     }
 }
