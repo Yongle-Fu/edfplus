@@ -1043,10 +1043,6 @@ impl EdfWriter {
     /// #     transducer: "".to_string(),
     /// # };
     /// # writer.add_signal(signal)?;
-    /// for i in 0..5 {
-    ///     let samples = vec![0.0; 256];
-    ///     writer.write_samples(&[samples])?;
-    /// }
     /// 
     /// // ✅ Good - within file duration [0.0, 5.0)
     /// writer.add_annotation(2.5, None, "Valid event")?;
@@ -1055,6 +1051,11 @@ impl EdfWriter {
     /// // ❌ Lost - outside file duration
     /// writer.add_annotation(5.0, None, "Will be discarded")?;
     /// writer.add_annotation(6.0, None, "Also discarded")?;
+    /// 
+    /// for i in 0..5 {
+    ///     let samples = vec![0.0; 256];
+    ///     writer.write_samples(&[samples])?;
+    /// }
     /// # std::fs::remove_file("annotations.edf").ok();
     /// # Ok(())
     /// # }
