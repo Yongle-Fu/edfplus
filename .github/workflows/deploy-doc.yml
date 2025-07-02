@@ -10,3 +10,4 @@ jobs:
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./target/doc
+          force_orphan: true  # 完全覆盖旧分支内容
