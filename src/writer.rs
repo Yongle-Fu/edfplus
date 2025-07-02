@@ -636,20 +636,36 @@ impl EdfWriter {
         Ok(())
     }
     
-    /// Writes physical sample data to the EDF+ file
+    /// Writes sample data for all signals to the current data record
     /// 
-    /// Writes one data record worth of samples for all signals. Each signal
-    /// must provide the same number of samples. Physical values are automatically
-    /// converted to digital values using each signal's calibration parameters.
+    /// **⚠️ WARNING: IRREVERSIBLE OPERATION**
+    /// 
+    /// Once this method is called, the written data record **CANNOT be modified**.
+    /// This library uses a **sequential streaming write** architecture that does not
+    /// support backtracking or random access modification.
+    /// 
+    /// **What happens when you call this method:**
+    /// 1. Signal sample data is immediately written to the file buffer
+    /// 2. Annotation data for this time period is generated and written
+    /// 3. The internal record counter is incremented
+    /// 4. **The written content becomes immutable**
+    /// 
+    /// **If you need to modify data:**
+    /// - Collect all your data and annotations first
+    /// - Create a new file with the corrected data
+    /// - See documentation for strategies: in-memory preparation, temporary files, etc.
     /// 
     /// # Arguments
     /// 
-    /// * `samples` - Vector of sample vectors, one per signal in order
+    /// * `samples` - Vector of sample vectors, one per signal channel
+    ///   - Must contain exactly the same number of vectors as signals added
+    ///   - Each vector must contain exactly `samples_per_record` samples
     /// 
     /// # Errors
     /// 
-    /// * `EdfError::InvalidFormat` - Mismatched sample counts between signals
-    /// * `EdfError::FileWriteError` - I/O error writing to file
+    /// * `EdfError::InvalidFormat` - Wrong number of sample vectors or samples per vector
+    /// * `EdfError::FileWriteError` - I/O error during writing
+    /// * `EdfError::NotReady` - File headers not written yet
     /// 
     /// # Sample Organization
     /// 
@@ -960,15 +976,22 @@ impl EdfWriter {
     
     /// Adds an annotation/event to the EDF+ file
     /// 
-    /// Annotations allow you to mark events, triggers, or time periods within
-    /// the recording. They are stored as part of the EDF+ format and can be
-    /// read back later.
+    /// **⚠️ CRITICAL TIMING CONSTRAINT**
+    /// 
+    /// Annotations are only saved when their onset time falls within **future data records**.
+    /// Once a data record is written with `write_samples()`, no new annotations can be 
+    /// added to that time period.
+    /// 
+    /// **Timing Rules:**
+    /// - Add annotations **BEFORE** writing the data records that cover their time range
+    /// - Annotations with `onset_seconds` in already-written time periods will be **silently lost**
+    /// - This is due to the sequential write architecture - no backtracking is possible
     /// 
     /// # Arguments
     /// 
     /// * `onset_seconds` - Time when the event occurred (seconds since recording start)
-    /// * `duration_seconds` - Duration of the event in seconds (None for instantaneous events)
-    /// * `description` - UTF-8 text describing the event
+    /// * `duration_seconds` - Duration of the event in seconds (None for instantaneous events)  
+    /// * `description` - UTF-8 text describing the event (max 40 chars effective)
     /// 
     /// # Important Limitations
     /// 

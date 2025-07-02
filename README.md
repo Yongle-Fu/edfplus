@@ -825,6 +825,170 @@ println!("完整PSG (32通道, 200Hz, 8小时): {:.1} MB", psg_full_8h); // ~369
 - **注释系统**: EDF+支持时间标记的事件和注释，用于标记重要事件或状态变化
 - **标准化字段**: 患者信息、设备信息等采用标准化格式，确保跨系统兼容性
 
+
+## ⚠️ **重要架构限制**
+
+### 🚫 不支持回溯写入/修改
+
+**关键限制**：这个库采用**顺序流式写入**架构，一旦调用 `write_samples()` 写入数据，已写入的内容就**永远无法更改**。
+
+```rust
+let mut writer = EdfWriter::create("test.edf")?;
+// ... 添加信号 ...
+
+// ✅ 写入第1个数据记录
+writer.write_samples(&[samples1])?;  // 时间: 0-1秒
+
+// ✅ 写入第2个数据记录  
+writer.write_samples(&[samples2])?;  // 时间: 1-2秒
+
+// ❌ 此时想要修改第1个数据记录 - **不可能！**
+// 第1个数据记录已经写入文件缓冲区，无法更改
+
+// ❌ 想要为第1个数据记录添加遗漏的注释 - **不可能！** 
+writer.add_annotation(0.5, None, "Missed event")?;  
+// 这个注释永远不会被写入文件，因为对应的数据记录已经完成
+
+// ❌ 想要修改第1个数据记录的采样值 - **不可能！**
+// 数据已经从内存写入到文件，无法回头修改
+```
+
+### 为什么不支持回溯写入？
+
+1. **性能优化**：使用 `BufWriter<File>` 进行缓冲写入，优化了顺序写入性能
+2. **内存效率**：流式处理，内存使用量与文件大小无关  
+3. **架构简化**：避免复杂的随机访问和缓存管理
+
+### 💡 如果需要修改数据怎么办？
+
+如果你需要修改已写入的数据，有以下几种策略：
+
+#### 策略1：重新生成文件
+```rust
+// 收集所有数据和注释，然后重新写入
+let mut all_samples = Vec::new();
+let mut all_annotations = Vec::new();
+
+// 收集数据...
+all_samples.push(samples1);
+all_samples.push(samples2);
+// 发现需要添加遗漏的注释
+all_annotations.push((0.5, "Missed event"));
+
+// 重新创建文件
+let mut writer = EdfWriter::create("corrected_file.edf")?;
+// 先添加所有注释
+for (time, desc) in &all_annotations {
+    writer.add_annotation(*time, None, desc)?;
+}
+// 然后写入所有数据
+for samples in &all_samples {
+    writer.write_samples(&[samples.clone()])?;
+}
+```
+
+#### 策略2：分阶段处理
+```rust
+// 先在内存中准备所有数据，最后一次性写入
+struct RecordingSession {
+    samples: Vec<Vec<Vec<f64>>>,  // [记录][通道][样本]
+    annotations: Vec<(f64, String)>,
+}
+
+impl RecordingSession {
+    fn add_samples(&mut self, record_idx: usize, channel_idx: usize, samples: Vec<f64>) {
+        // 在内存中修改数据
+        self.samples[record_idx][channel_idx] = samples;
+    }
+    
+    fn add_annotation(&mut self, time: f64, desc: String) {
+        // 可以随时添加注释
+        self.annotations.push((time, desc));
+    }
+    
+    fn write_to_file(&self, filename: &str) -> Result<()> {
+        let mut writer = EdfWriter::create(filename)?;
+        
+        // 先添加所有注释
+        for (time, desc) in &self.annotations {
+            writer.add_annotation(*time, None, desc)?;
+        }
+        
+        // 然后按顺序写入所有数据记录
+        for record_samples in &self.samples {
+            writer.write_samples(record_samples)?;
+        }
+        
+        writer.finalize()
+    }
+}
+```
+
+#### 策略3：使用临时文件
+```rust
+use std::fs;
+use tempfile::NamedTempFile;
+
+// 写入临时文件，确认无误后替换目标文件
+let temp_file = NamedTempFile::new()?;
+let temp_path = temp_file.path();
+
+{
+    let mut writer = EdfWriter::create(temp_path)?;
+    // ... 写入数据 ...
+    writer.finalize()?;
+}  // writer被drop，文件被关闭
+
+// 验证文件正确性
+let reader = EdfReader::open(temp_path)?;
+if validate_file(&reader)? {
+    // 替换目标文件
+    fs::copy(temp_path, "final_output.edf")?;
+    println!("文件写入成功");
+} else {
+    println!("文件验证失败，未替换原文件");
+}
+```
+
+### 🎯 最佳实践建议
+
+1. **提前规划**：在开始写入前就确定好所有的数据和注释
+2. **分批验证**：可以先写入少量数据进行测试
+3. **使用临时文件**：对于重要数据，先写入临时文件再验证
+4. **文档化流程**：记录数据写入的顺序和依赖关系
+
+```rust
+// 推荐的写入流程
+fn create_edf_file() -> Result<()> {
+    // 1. 数据准备阶段
+    let mut all_annotations = prepare_annotations()?;
+    let signal_params = define_signals()?;
+    
+    // 2. 创建写入器并配置
+    let mut writer = EdfWriter::create("output.edf")?;
+    writer.set_patient_info("P001", "M", "01-JAN-1990", "Test")?;
+    
+    for param in signal_params {
+        writer.add_signal(param)?;
+    }
+    
+    // 3. 添加所有预期的注释
+    for (time, desc) in all_annotations {
+        writer.add_annotation(time, None, &desc)?;
+    }
+    
+    // 4. 顺序写入所有数据（不再修改）
+    for record_idx in 0..total_records {
+        let samples = generate_samples_for_record(record_idx)?;
+        writer.write_samples(&samples)?;
+    }
+    
+    // 5. 完成文件
+    writer.finalize()?;
+    Ok(())
+}
+```
+
 ## 性能
 
 - **内存效率**: 支持流式读取，内存使用量与文件大小无关
