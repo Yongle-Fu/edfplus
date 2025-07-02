@@ -586,7 +586,80 @@ impl EdfReader {
         Ok(samples)
     }
     
-    /// 设置指定信号的样本位置
+    /// Sets the sample position for the specified signal
+    /// 
+    /// This method allows you to jump to any position within the signal's data
+    /// for non-sequential reading. Position is automatically clamped to valid
+    /// range [0, total_samples_in_signal].
+    /// 
+    /// # Arguments
+    /// 
+    /// * `signal` - Zero-based index of the signal
+    /// * `position` - Sample position to seek to (0-based)
+    /// 
+    /// # Returns
+    /// 
+    /// Returns the actual position after clamping to valid range.
+    /// 
+    /// # Errors
+    /// 
+    /// * `EdfError::InvalidSignalIndex` - Signal index is out of bounds
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// use edfplus::EdfReader;
+    /// 
+    /// # // Generate test file (hidden from docs)
+    /// # edfplus::doctest_utils::create_simple_test_file("positioning.edf")?;
+    /// # 
+    /// let mut reader = EdfReader::open("positioning.edf")?;
+    /// 
+    /// // Read from beginning
+    /// let start_samples = reader.read_physical_samples(0, 3)?;
+    /// 
+    /// // Jump to middle of the signal
+    /// let signal_length = reader.header().signals[0].samples_in_file;
+    /// let mid_position = signal_length / 2;
+    /// let actual_pos = reader.seek(0, mid_position)?;
+    /// assert_eq!(actual_pos, mid_position);
+    /// 
+    /// // Verify we can read from the new position
+    /// let mid_samples = reader.read_physical_samples(0, 3)?;
+    /// 
+    /// // Position should have advanced
+    /// assert_eq!(reader.tell(0)?, mid_position + 3);
+    /// 
+    /// # // Cleanup (hidden from docs)
+    /// # std::fs::remove_file("positioning.edf").ok();
+    /// # Ok::<(), edfplus::EdfError>(())
+    /// ```
+    /// 
+    /// ## Position clamping and validation
+    /// 
+    /// ```rust
+    /// use edfplus::EdfReader;
+    /// 
+    /// # // Generate test file (hidden from docs)
+    /// # edfplus::doctest_utils::create_simple_test_file("bounds_test.edf")?;
+    /// # 
+    /// let mut reader = EdfReader::open("bounds_test.edf")?;
+    /// let signal_length = reader.header().signals[0].samples_in_file;
+    /// 
+    /// // Test position clamping
+    /// let actual_pos = reader.seek(0, -100)?;  // Negative position
+    /// assert_eq!(actual_pos, 0);  // Clamped to 0
+    /// 
+    /// let actual_pos = reader.seek(0, signal_length + 1000)?;  // Beyond end
+    /// assert_eq!(actual_pos, signal_length);  // Clamped to max
+    /// 
+    /// let actual_pos = reader.seek(0, 42)?;  // Valid position
+    /// assert_eq!(actual_pos, 42);  // Exact position
+    /// 
+    /// # // Cleanup (hidden from docs)
+    /// # std::fs::remove_file("bounds_test.edf").ok();
+    /// # Ok::<(), edfplus::EdfError>(())
+    /// ```
     pub fn seek(&mut self, signal: usize, position: i64) -> Result<i64> {
         if signal >= self.header.signals.len() {
             return Err(EdfError::InvalidSignalIndex(signal));
@@ -601,7 +674,80 @@ impl EdfReader {
         Ok(new_position)
     }
     
-    /// 获取指定信号的当前样本位置
+    /// Gets the current sample position for the specified signal
+    /// 
+    /// This method returns the current reading position within the signal's data.
+    /// The position indicates which sample will be read next by `read_physical_samples()`
+    /// or `read_digital_samples()`.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `signal` - Zero-based index of the signal
+    /// 
+    /// # Returns
+    /// 
+    /// Current sample position (0-based) within the signal.
+    /// 
+    /// # Errors
+    /// 
+    /// * `EdfError::InvalidSignalIndex` - Signal index is out of bounds
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// use edfplus::EdfReader;
+    /// 
+    /// # // Generate test file (hidden from docs)
+    /// # edfplus::doctest_utils::create_simple_test_file("position_test.edf")?;
+    /// # 
+    /// let mut reader = EdfReader::open("position_test.edf")?;
+    /// 
+    /// // Initially at position 0
+    /// assert_eq!(reader.tell(0)?, 0);
+    /// 
+    /// // Read some samples
+    /// reader.read_physical_samples(0, 10)?;
+    /// assert_eq!(reader.tell(0)?, 10);
+    /// 
+    /// // Seek to different position
+    /// reader.seek(0, 100)?;
+    /// assert_eq!(reader.tell(0)?, 100);
+    /// 
+    /// // Read more samples
+    /// reader.read_physical_samples(0, 5)?;
+    /// assert_eq!(reader.tell(0)?, 105);
+    /// 
+    /// # // Cleanup (hidden from docs)
+    /// # std::fs::remove_file("position_test.edf").ok();
+    /// # Ok::<(), edfplus::EdfError>(())
+    /// ```
+    /// 
+    /// ## Working with multiple signals
+    /// 
+    /// ```rust
+    /// use edfplus::EdfReader;
+    /// 
+    /// # // Generate test file (hidden from docs)
+    /// # edfplus::doctest_utils::create_multi_channel_test_file("multi_pos.edf")?;
+    /// # 
+    /// let mut reader = EdfReader::open("multi_pos.edf")?;
+    /// let signal_count = reader.header().signals.len();
+    /// 
+    /// // Each signal has independent position tracking
+    /// for i in 0..signal_count {
+    ///     assert_eq!(reader.tell(i)?, 0);
+    ///     
+    ///     // Read different amounts from each signal
+    ///     reader.read_physical_samples(i, (i + 1) * 10)?;
+    ///     
+    ///     // Each signal should be at different position
+    ///     assert_eq!(reader.tell(i)?, ((i + 1) * 10) as i64);
+    /// }
+    /// 
+    /// # // Cleanup (hidden from docs)
+    /// # std::fs::remove_file("multi_pos.edf").ok();
+    /// # Ok::<(), edfplus::EdfError>(())
+    /// ```
     pub fn tell(&self, signal: usize) -> Result<i64> {
         if signal >= self.header.signals.len() {
             return Err(EdfError::InvalidSignalIndex(signal));
@@ -610,7 +756,83 @@ impl EdfReader {
         Ok(self.sample_positions[signal])
     }
     
-    /// 将指定信号的位置重置到开头
+    /// Resets the position of the specified signal to the beginning
+    /// 
+    /// This is equivalent to calling `seek(signal, 0)` but provides a more
+    /// convenient and semantic interface for returning to the start of the signal.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `signal` - Zero-based index of the signal to rewind
+    /// 
+    /// # Errors
+    /// 
+    /// * `EdfError::InvalidSignalIndex` - Signal index is out of bounds
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// use edfplus::EdfReader;
+    /// 
+    /// # // Generate test file (hidden from docs)
+    /// # edfplus::doctest_utils::create_simple_test_file("rewind_test.edf")?;
+    /// # 
+    /// let mut reader = EdfReader::open("rewind_test.edf")?;
+    /// 
+    /// // Read some data to advance position
+    /// reader.read_physical_samples(0, 50)?;
+    /// assert_eq!(reader.tell(0)?, 50);
+    /// 
+    /// // Rewind to beginning
+    /// reader.rewind(0)?;
+    /// assert_eq!(reader.tell(0)?, 0);
+    /// 
+    /// // We can read from beginning again
+    /// let samples_after_rewind = reader.read_physical_samples(0, 5)?;
+    /// assert_eq!(samples_after_rewind.len(), 5);
+    /// 
+    /// // Position should advance from 0 to 5
+    /// assert_eq!(reader.tell(0)?, 5);
+    /// 
+    /// # // Cleanup (hidden from docs)
+    /// # std::fs::remove_file("rewind_test.edf").ok();
+    /// # Ok::<(), edfplus::EdfError>(())
+    /// ```
+    /// 
+    /// ## Complete positioning workflow
+    /// 
+    /// ```rust
+    /// use edfplus::EdfReader;
+    /// 
+    /// # // Generate test file (hidden from docs)
+    /// # edfplus::doctest_utils::create_simple_test_file("workflow.edf")?;
+    /// # 
+    /// let mut reader = EdfReader::open("workflow.edf")?;
+    /// 
+    /// // Start from beginning
+    /// assert_eq!(reader.tell(0)?, 0);
+    /// let start_data = reader.read_physical_samples(0, 3)?;
+    /// 
+    /// // Jump to middle
+    /// let signal_length = reader.header().signals[0].samples_in_file;
+    /// reader.seek(0, signal_length / 2)?;
+    /// let mid_data = reader.read_physical_samples(0, 3)?;
+    /// 
+    /// // Jump near end
+    /// reader.seek(0, signal_length - 10)?;
+    /// let end_data = reader.read_physical_samples(0, 3)?;
+    /// 
+    /// // Go back to beginning
+    /// reader.rewind(0)?;
+    /// let start_again = reader.read_physical_samples(0, 3)?;
+    /// 
+    /// // First and last reads from start should be identical
+    /// assert_eq!(start_data, start_again);
+    /// 
+    /// # // Cleanup (hidden from docs)
+    /// # std::fs::remove_file("workflow.edf").ok();
+    /// # Ok::<(), edfplus::EdfError>(())
+    /// ```
     pub fn rewind(&mut self, signal: usize) -> Result<()> {
         self.seek(signal, 0)?;
         Ok(())

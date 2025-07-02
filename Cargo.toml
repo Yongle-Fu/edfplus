@@ -12,16 +12,6 @@ keywords = ["edf", "signal-processing", "eeg", "medical", "biosignal"]
 categories = ["science", "parser-implementations"]
 readme = "README.md"
 
-# 排除不需要的文件
-exclude = [
-    ".github/**/*",
-    "target/**/*",
-    "*.edf",
-    "*.bdf",
-    ".gitignore",
-]
-
-# 包含 examples（推荐！）
 include = [
     "src/**/*",
     "examples/*",

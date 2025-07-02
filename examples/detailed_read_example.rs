@@ -77,6 +77,14 @@ fn main() -> Result<()> {
             println!("📊 样本数据预览 (前10个样本):");
             for signal_idx in 0..signals.len() {
                 let signal = &signals[signal_idx];
+                
+                // 注意：EDF文件中的注释信号不能用常规方法读取样本数据
+                // EDF规范中字符串字段可能包含null字节，所以使用contains()检查更可靠
+                if signal.label.contains("Annotation") {
+                    println!("\n  {} (注释信号，跳过数据读取)", signal.label);
+                    continue;
+                }
+                
                 println!("\n  {} ({}):", signal.label, signal.physical_dimension);
                 
                 // 重置到文件开头
@@ -109,22 +117,41 @@ fn main() -> Result<()> {
             // 测试定位功能
             println!("\n🎯 测试文件定位功能:");
             if !signals.is_empty() {
-                let signal_idx = 0;
-                let mid_position = signals[signal_idx].samples_in_file / 2;
+                // 找到第一个非注释信号
+                let signal_idx = signals.iter().position(|s| !s.label.contains("Annotation")).unwrap_or(0);
                 
-                // 定位到中间位置
-                reader.seek(signal_idx, mid_position)?;
-                let current_pos = reader.tell(signal_idx)?;
-                println!("  定位到信号 {} 的位置 {} (目标: {})", signal_idx, current_pos, mid_position);
-                
-                // 读取几个样本
-                let samples = reader.read_physical_samples(signal_idx, 5)?;
-                println!("  从中间位置读取的5个样本: {:?}", samples);
-                
-                // 回到开头
-                reader.rewind(signal_idx)?;
-                let pos_after_rewind = reader.tell(signal_idx)?;
-                println!("  重置后位置: {}", pos_after_rewind);
+                if !signals[signal_idx].label.contains("Annotation") {
+                    // 确保重置到文件开头
+                    reader.rewind(signal_idx)?;
+                    let initial_pos = reader.tell(signal_idx)?;
+                    println!("调试：重置后的初始位置: {}", initial_pos);
+                    
+                    // 从开头读取几个样本作为基准
+                    let baseline_samples = reader.read_physical_samples(signal_idx, 3)?;
+                    println!("  开头3个样本: {:?}", baseline_samples);
+                    
+                    // 重置后定位到位置 100
+                    reader.rewind(signal_idx)?;
+                    let test_position = 100;
+                    reader.seek(signal_idx, test_position)?;
+                    let current_pos = reader.tell(signal_idx)?;
+                    println!("  定位到位置 {} (实际: {})", test_position, current_pos);
+                    
+                    // 读取定位后的样本
+                    let positioned_samples = reader.read_physical_samples(signal_idx, 3)?;
+                    println!("  位置 {} 的3个样本: {:?}", test_position, positioned_samples);
+                    
+                    // 验证样本确实不同
+                    if baseline_samples != positioned_samples {
+                        println!("  ✅ 定位功能正常工作 - 样本已改变");
+                    } else {
+                        println!("  ⚠️  定位可能有问题 - 样本相同");
+                    }
+                    
+                    // 最后重置
+                    reader.rewind(signal_idx)?;
+                    println!("  重置完成");
+                }
             }
             
             println!("\n✅ 测试完成！");
