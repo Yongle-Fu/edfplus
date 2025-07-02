@@ -100,7 +100,69 @@
 //!     Ok(())
 //! }
 //! ```
-//!
+//! ### Adds an annotation/event to the EDF+ file
+//! 
+//! **⚠️ CRITICAL TIMING CONSTRAINT**
+//! 
+//! Annotations are only saved when their onset time falls within **future data records**.
+//! Once a data record is written with `write_samples()`, no new annotations can be 
+//! added to that time period.
+//! 
+//! **Timing Rules:**
+//! - Add annotations **BEFORE** writing the data records that cover their time range
+//! - Annotations with `onset_seconds` in already-written time periods will be **silently lost**
+//! - This is due to the sequential write architecture - no backtracking is possible
+//! 
+//! ##### Arguments
+//! 
+//! * `onset_seconds` - Time when the event occurred (seconds since recording start)
+//! * `duration_seconds` - Duration of the event in seconds (None for instantaneous events)  
+//! * `description` - UTF-8 text describing the event (max 40 chars effective)
+//! 
+//! ##### Description Length Limit
+//! 
+//! **Warning**: Annotation descriptions are subject to EDF+ format constraints:
+//! - Maximum effective length is **40 characters** in the final TAL (Time-stamped Annotations Lists) data
+//! - Longer descriptions will be **automatically truncated** during file writing
+//! - UTF-8 multi-byte characters may be truncated at byte boundaries, potentially corrupting the text
+//! - This limit is enforced by the EDF+ standard and matches edflib behavior
+//! 
+//! ```rust
+//! // Write 5 seconds of data (5 records)
+//! # use edfplus::{EdfWriter, SignalParam, Result};
+//! # fn main() -> Result<()> {
+//! let mut writer = EdfWriter::create("annotations.edf")?;
+//! # let signal = SignalParam {
+//! #     label: "EEG".to_string(),
+//! #     samples_in_file: 0,
+//! #     physical_max: 100.0,
+//! #     physical_min: -100.0,
+//! #     digital_max: 32767,
+//! #     digital_min: -32768,
+//! #     samples_per_record: 256,
+//! #     physical_dimension: "uV".to_string(),
+//! #     prefilter: "".to_string(),
+//! #     transducer: "".to_string(),
+//! # };
+//! # writer.add_signal(signal)?;
+//! 
+//! // ✅ Good - within file duration [0.0, 5.0)
+//! writer.add_annotation(2.5, None, "Valid event")?;
+//! writer.add_annotation(4.999, None, "Last moment")?;
+//! 
+//! // ❌ Lost - outside file duration
+//! writer.add_annotation(5.0, None, "Will be discarded")?;
+//! writer.add_annotation(6.0, None, "Also discarded")?;
+//! 
+//! for i in 0..5 {
+//!     let samples = vec![0.0; 256];
+//!     writer.write_samples(&[samples])?;
+//! }
+//! # std::fs::remove_file("annotations.edf").ok();
+//! # Ok(())
+//! # }
+//! ```
+//! 
 //! ## Working with Signal Data
 //!
 //! ### Physical vs Digital Values
@@ -134,71 +196,8 @@
 //! let digital_output = signal.to_digital(physical_input);
 //! assert!((digital_output - 8192).abs() <= 1); // Should be ~8192
 //! ```
-//! 
-/// Adds an annotation/event to the EDF+ file
-/// 
-/// **⚠️ CRITICAL TIMING CONSTRAINT**
-/// 
-/// Annotations are only saved when their onset time falls within **future data records**.
-/// Once a data record is written with `write_samples()`, no new annotations can be 
-/// added to that time period.
-/// 
-/// **Timing Rules:**
-/// - Add annotations **BEFORE** writing the data records that cover their time range
-/// - Annotations with `onset_seconds` in already-written time periods will be **silently lost**
-/// - This is due to the sequential write architecture - no backtracking is possible
-/// 
-/// # Arguments
-/// 
-/// * `onset_seconds` - Time when the event occurred (seconds since recording start)
-/// * `duration_seconds` - Duration of the event in seconds (None for instantaneous events)  
-/// * `description` - UTF-8 text describing the event (max 40 chars effective)
-/// 
-/// # Important Limitations
-/// 
-/// ## Description Length Limit
-/// 
-/// **Warning**: Annotation descriptions are subject to EDF+ format constraints:
-/// - Maximum effective length is **40 characters** in the final TAL (Time-stamped Annotations Lists) data
-/// - Longer descriptions will be **automatically truncated** during file writing
-/// - UTF-8 multi-byte characters may be truncated at byte boundaries, potentially corrupting the text
-/// - This limit is enforced by the EDF+ standard and matches edflib behavior
-/// 
-/// ```rust
-/// // Write 5 seconds of data (5 records)
-/// # use edfplus::{EdfWriter, SignalParam, Result};
-/// # fn main() -> Result<()> {
-/// let mut writer = EdfWriter::create("annotations.edf")?;
-/// # let signal = SignalParam {
-/// #     label: "EEG".to_string(),
-/// #     samples_in_file: 0,
-/// #     physical_max: 100.0,
-/// #     physical_min: -100.0,
-/// #     digital_max: 32767,
-/// #     digital_min: -32768,
-/// #     samples_per_record: 256,
-/// #     physical_dimension: "uV".to_string(),
-/// #     prefilter: "".to_string(),
-/// #     transducer: "".to_string(),
-/// # };
-/// # writer.add_signal(signal)?;
-/// 
-/// // ✅ Good - within file duration [0.0, 5.0)
-/// writer.add_annotation(2.5, None, "Valid event")?;
-/// writer.add_annotation(4.999, None, "Last moment")?;
-/// 
-/// // ❌ Lost - outside file duration
-/// writer.add_annotation(5.0, None, "Will be discarded")?;
-/// writer.add_annotation(6.0, None, "Also discarded")?;
-/// 
-/// for i in 0..5 {
-///     let samples = vec![0.0; 256];
-///     writer.write_samples(&[samples])?;
-/// }
-/// # std::fs::remove_file("annotations.edf").ok();
-/// # Ok(())
-/// # }
-/// ```
+
+
 
 pub mod error;
 pub mod types;
