@@ -10,10 +10,39 @@ use crate::EDFLIB_TIME_DIMENSION;
 /// Maximum number of annotation channels (matches edflib)
 const EDFLIB_MAX_ANNOTATION_CHANNELS: usize = 64;
 
-/// Annotation bytes per channel (must be multiple of 6, matches edflib)
+/// TAL (Time-stamped Annotations Lists) data size per annotation channel in bytes
+/// 
+/// Each annotation channel gets exactly 120 bytes in each data record to store
+/// TAL data. This includes time stamps, durations, descriptions, and formatting 
+/// characters. The 120-byte limit is part of the EDF+ specification.
 const EDFLIB_ANNOTATION_BYTES: usize = 120;
 
-/// Maximum annotation description length
+/// Maximum effective length for annotation descriptions in the TAL format
+/// 
+/// **Critical Limitation**: This is the maximum number of characters that can
+/// be stored in an annotation description within the EDF+ TAL format constraints.
+/// 
+/// - Descriptions longer than 40 characters will be **truncated** during file writing
+/// - UTF-8 multi-byte characters may be split, potentially corrupting text
+/// - This limit is enforced by the available space in the 120-byte TAL buffer
+/// - Matches the behavior of the original edflib C library
+/// 
+/// # Impact on Users
+/// 
+/// ```rust
+/// # use edfplus::{EdfWriter, Result};
+/// # fn main() -> Result<()> {
+/// let mut writer = EdfWriter::create("test.edf")?;
+/// // ✅ This will be stored completely
+/// writer.add_annotation(1.0, None, "Short event")?;
+/// 
+/// // ⚠️ This will be truncated to 40 chars
+/// writer.add_annotation(2.0, None, "This is a very long annotation description that exceeds the limit")?;
+/// // Result: "This is a very long annotation descripti"
+/// # std::fs::remove_file("test.edf").ok();
+/// # Ok(())
+/// # }
+/// ```
 const EDFLIB_WRITE_MAX_ANNOTATION_LEN: usize = 40;
 
 
@@ -627,85 +656,90 @@ impl EdfWriter {
     /// The `samples` parameter must be organized as:
     /// - Outer vector: one element per signal (in order added)
     /// - Inner vectors: physical values for each signal
-    /// - All inner vectors must have the same length
+    /// - All inner vectors must have the same length (matching `samples_per_record`)
     /// 
     /// # Examples
+    /// 
+    /// ## Writing a single data record with multiple signals
     /// 
     /// ```rust
     /// use edfplus::{EdfWriter, SignalParam};
     /// 
-    /// let mut writer = EdfWriter::create("samples.edf")?;
+    /// let mut writer = EdfWriter::create("multi_signal.edf")?;
     /// 
-    /// // Add two signals
+    /// // Add two signals with the same sampling rate
     /// writer.add_signal(SignalParam {
-    ///     label: "EEG".to_string(),
+    ///     label: "EEG Fp1".to_string(),
     ///     samples_in_file: 0,
     ///     physical_max: 100.0, physical_min: -100.0,
     ///     digital_max: 32767, digital_min: -32768,
-    ///     samples_per_record: 256,
+    ///     samples_per_record: 256,  // 256 samples per data record
     ///     physical_dimension: "uV".to_string(),
-    ///     prefilter: "None".to_string(),
-    ///     transducer: "Electrode".to_string(),
+    ///     prefilter: "HP:0.1Hz LP:70Hz".to_string(),
+    ///     transducer: "AgAgCl electrodes".to_string(),
     /// })?;
     /// 
     /// writer.add_signal(SignalParam {
-    ///     label: "ECG".to_string(),
+    ///     label: "ECG Lead II".to_string(),
     ///     samples_in_file: 0,
     ///     physical_max: 5.0, physical_min: -5.0,
     ///     digital_max: 32767, digital_min: -32768,
-    ///     samples_per_record: 256,
+    ///     samples_per_record: 256,  // Same sampling rate as EEG
     ///     physical_dimension: "mV".to_string(),
-    ///     prefilter: "None".to_string(),
-    ///     transducer: "Electrode".to_string(),
+    ///     prefilter: "HP:0.1Hz LP:100Hz".to_string(),
+    ///     transducer: "Chest electrodes".to_string(),
     /// })?;
     /// 
-    /// // Generate sample data (256 samples per signal)
+    /// // Generate sample data (256 samples for each signal)
     /// let mut eeg_samples = Vec::new();
     /// let mut ecg_samples = Vec::new();
     /// 
     /// for i in 0..256 {
-    ///     let t = i as f64 / 256.0;
-    ///     eeg_samples.push(20.0 * (2.0 * std::f64::consts::PI * 10.0 * t).sin());
-    ///     ecg_samples.push(1.0 * (2.0 * std::f64::consts::PI * 1.0 * t).sin());
+    ///     let t = i as f64 / 256.0;  // Time within this 1-second data record
+    ///     eeg_samples.push(20.0 * (2.0 * std::f64::consts::PI * 10.0 * t).sin()); // 10 Hz EEG
+    ///     ecg_samples.push(1.0 * (2.0 * std::f64::consts::PI * 1.0 * t).sin());   // 1 Hz ECG
     /// }
     /// 
-    /// // Write the samples (order matches signal addition order)
+    /// // Write one data record containing both signals
     /// writer.write_samples(&[eeg_samples, ecg_samples])?;
+    /// writer.finalize()?;
     /// 
     /// # // Cleanup (hidden from docs)
-    /// # std::fs::remove_file("samples.edf").ok();
+    /// # std::fs::remove_file("multi_signal.edf").ok();
     /// # Ok::<(), edfplus::EdfError>(())
     /// ```
     /// 
-    /// ## Writing multiple data records
+    /// ## Writing multiple data records (continuous recording)
     /// 
     /// ```rust
     /// use edfplus::{EdfWriter, SignalParam};
     /// 
     /// let mut writer = EdfWriter::create("continuous.edf")?;
     /// 
-    /// // Add a signal
+    /// // Add a single signal
     /// writer.add_signal(SignalParam {
-    ///     label: "Continuous Signal".to_string(),
+    ///     label: "Continuous EEG".to_string(),
     ///     samples_in_file: 0,
-    ///     physical_max: 1.0, physical_min: -1.0,
+    ///     physical_max: 100.0, physical_min: -100.0,
     ///     digital_max: 32767, digital_min: -32768,
-    ///     samples_per_record: 100,  // 100 Hz
-    ///     physical_dimension: "V".to_string(),
-    ///     prefilter: "None".to_string(),
-    ///     transducer: "Sensor".to_string(),
+    ///     samples_per_record: 256,  // 256 Hz sampling rate (256 samples per 1-second record)
+    ///     physical_dimension: "uV".to_string(),
+    ///     prefilter: "HP:0.1Hz LP:70Hz".to_string(),
+    ///     transducer: "AgAgCl electrodes".to_string(),
     /// })?;
     /// 
-    /// // Write 10 seconds of data (10 data records)
+    /// // Write 10 seconds of continuous data (10 data records)
     /// for second in 0..10 {
     ///     let mut samples = Vec::new();
     ///     
-    ///     for i in 0..100 {
-    ///         let t = (second * 100 + i) as f64 / 100.0;
-    ///         let value = (2.0 * std::f64::consts::PI * 2.0 * t).sin();
+    ///     // Generate 256 samples for this 1-second data record
+    ///     for i in 0..256 {
+    ///         let t = (second * 256 + i) as f64 / 256.0;  // Absolute time since recording start
+    ///         let value = 50.0 * (2.0 * std::f64::consts::PI * 10.0 * t).sin();
     ///         samples.push(value);
     ///     }
     ///     
+    ///     // Write one data record (note: samples is a Vec<f64>, so we wrap it in &[samples])
     ///     writer.write_samples(&[samples])?;
     /// }
     /// 
@@ -713,6 +747,66 @@ impl EdfWriter {
     /// 
     /// # // Cleanup (hidden from docs)
     /// # std::fs::remove_file("continuous.edf").ok();
+    /// # Ok::<(), edfplus::EdfError>(())
+    /// ```
+    /// 
+    /// ## Writing multiple signals with different sampling rates
+    /// 
+    /// ```rust
+    /// use edfplus::{EdfWriter, SignalParam};
+    /// 
+    /// let mut writer = EdfWriter::create("mixed_rates.edf")?;
+    /// 
+    /// // High-frequency EEG signal
+    /// writer.add_signal(SignalParam {
+    ///     label: "EEG C3".to_string(),
+    ///     samples_in_file: 0,
+    ///     physical_max: 200.0, physical_min: -200.0,
+    ///     digital_max: 32767, digital_min: -32768,
+    ///     samples_per_record: 500,  // 500 Hz sampling rate
+    ///     physical_dimension: "uV".to_string(),
+    ///     prefilter: "HP:0.1Hz LP:200Hz".to_string(),
+    ///     transducer: "Gold cup electrodes".to_string(),
+    /// })?;
+    /// 
+    /// // Lower-frequency physiological signal
+    /// writer.add_signal(SignalParam {
+    ///     label: "Respiration".to_string(),
+    ///     samples_in_file: 0,
+    ///     physical_max: 10.0, physical_min: -10.0,
+    ///     digital_max: 32767, digital_min: -32768,
+    ///     samples_per_record: 25,   // 25 Hz sampling rate
+    ///     physical_dimension: "arbitrary".to_string(),
+    ///     prefilter: "LP:10Hz".to_string(),
+    ///     transducer: "Strain gauge".to_string(),
+    /// })?;
+    /// 
+    /// // Write 5 seconds of data
+    /// for second in 0..5 {
+    ///     // EEG: 500 samples for this data record
+    ///     let mut eeg_samples = Vec::new();
+    ///     for i in 0..500 {
+    ///         let t = (second * 500 + i) as f64 / 500.0;
+    ///         let value = 100.0 * (2.0 * std::f64::consts::PI * 10.0 * t).sin();
+    ///         eeg_samples.push(value);
+    ///     }
+    ///     
+    ///     // Respiration: 25 samples for this data record
+    ///     let mut resp_samples = Vec::new();
+    ///     for i in 0..25 {
+    ///         let t = (second * 25 + i) as f64 / 25.0;
+    ///         let value = 5.0 * (2.0 * std::f64::consts::PI * 0.3 * t).sin(); // 0.3 Hz breathing
+    ///         resp_samples.push(value);
+    ///     }
+    ///     
+    ///     // Write both signals for this data record
+    ///     writer.write_samples(&[eeg_samples, resp_samples])?;
+    /// }
+    /// 
+    /// writer.finalize()?;
+    /// 
+    /// # // Cleanup (hidden from docs)
+    /// # std::fs::remove_file("mixed_rates.edf").ok();
     /// # Ok::<(), edfplus::EdfError>(())
     /// ```
     pub fn write_samples(&mut self, samples: &[Vec<f64>]) -> Result<()> {
@@ -876,12 +970,97 @@ impl EdfWriter {
     /// * `duration_seconds` - Duration of the event in seconds (None for instantaneous events)
     /// * `description` - UTF-8 text describing the event
     /// 
+    /// # Important Limitations
+    /// 
+    /// ## Description Length Limit
+    /// 
+    /// **Warning**: Annotation descriptions are subject to EDF+ format constraints:
+    /// - Maximum effective length is **40 characters** in the final TAL (Time-stamped Annotations Lists) data
+    /// - Longer descriptions will be **automatically truncated** during file writing
+    /// - UTF-8 multi-byte characters may be truncated at byte boundaries, potentially corrupting the text
+    /// - This limit is enforced by the EDF+ standard and matches edflib behavior
+    /// 
+    /// ```rust
+    /// # use edfplus::{EdfWriter, SignalParam, Result};
+    /// # fn main() -> Result<()> {
+    /// let mut writer = EdfWriter::create("annotations.edf")?;
+    /// // ✅ Good - within 40 character limit
+    /// writer.add_annotation(1.0, None, "Sleep stage N2")?;
+    /// 
+    /// // ⚠️  Warning - will be truncated to 40 chars
+    /// writer.add_annotation(2.0, None, "This is a very long annotation description that exceeds the EDF+ limit")?;
+    /// // Result: "This is a very long annotation descripti"
+    /// # std::fs::remove_file("annotations.edf").ok();
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// 
+    /// ## Time Range Constraints
+    /// 
+    /// **Critical**: Annotations are only saved if their onset time falls within written data records:
+    /// - Annotations with `onset_seconds` >= total file duration will be **silently discarded**
+    /// - Each data record covers a specific time range (typically 1 second)
+    /// - An annotation at time T is only saved if there's a data record covering [T, T+duration)
+    /// 
+    /// ```rust
+    /// // Write 5 seconds of data (5 records)
+    /// # use edfplus::{EdfWriter, SignalParam, Result};
+    /// # fn main() -> Result<()> {
+    /// let mut writer = EdfWriter::create("annotations.edf")?;
+    /// # let signal = SignalParam {
+    /// #     label: "EEG".to_string(),
+    /// #     samples_in_file: 0,
+    /// #     physical_max: 100.0,
+    /// #     physical_min: -100.0,
+    /// #     digital_max: 32767,
+    /// #     digital_min: -32768,
+    /// #     samples_per_record: 256,
+    /// #     physical_dimension: "uV".to_string(),
+    /// #     prefilter: "".to_string(),
+    /// #     transducer: "".to_string(),
+    /// # };
+    /// # writer.add_signal(signal)?;
+    /// for i in 0..5 {
+    ///     let samples = vec![0.0; 256];
+    ///     writer.write_samples(&[samples])?;
+    /// }
+    /// 
+    /// // ✅ Good - within file duration [0.0, 5.0)
+    /// writer.add_annotation(2.5, None, "Valid event")?;
+    /// writer.add_annotation(4.999, None, "Last moment")?;
+    /// 
+    /// // ❌ Lost - outside file duration
+    /// writer.add_annotation(5.0, None, "Will be discarded")?;
+    /// writer.add_annotation(6.0, None, "Also discarded")?;
+    /// # std::fs::remove_file("annotations.edf").ok();
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// 
+    /// ## Best Practices
+    /// 
+    /// 1. **Keep descriptions concise** (≤40 characters)
+    /// 2. **Add annotations before finalizing** the file
+    /// 3. **Ensure sufficient data records** cover all annotation times
+    /// 4. **Use ASCII characters** when possible to avoid UTF-8 truncation issues
+    /// 5. **Validate annotation times** against your data duration
+    /// 
     /// # Time Precision
     /// 
     /// Time values are internally stored with 100-nanosecond precision.
     /// Input values will be rounded to the nearest 100 nanoseconds.
     /// 
+    /// # Errors
+    /// 
+    /// Returns `EdfError::InvalidFormat` if:
+    /// - `onset_seconds` is negative
+    /// - `duration_seconds` is negative
+    /// - `description` is empty
+    /// - `description` exceeds 512 characters (pre-truncation validation)
+    /// 
     /// # Examples
+    /// 
+    /// ## Basic Usage
     /// 
     /// ```rust
     /// use edfplus::{EdfWriter, SignalParam};
@@ -905,19 +1084,72 @@ impl EdfWriter {
     /// };
     /// writer.add_signal(signal)?;
     /// 
-    /// // Write some data
-    /// let samples = vec![10.0; 256];
-    /// writer.write_samples(&[samples])?;
+    /// // Write some data FIRST to establish time range
+    /// for i in 0..10 {
+    ///     let samples = vec![10.0; 256];
+    ///     writer.write_samples(&[samples])?;  // Creates 10 seconds of data
+    /// }
     /// 
-    /// // Add annotations
+    /// // Add annotations within the data time range [0.0, 10.0)
     /// writer.add_annotation(0.5, None, "Recording start")?;
     /// writer.add_annotation(2.0, Some(1.0), "Sleep stage 1")?;
     /// writer.add_annotation(5.5, None, "Eye movement")?;
+    /// writer.add_annotation(9.999, None, "Near end")?;  // Still within range
     /// 
     /// writer.finalize()?;
     /// 
     /// # // Cleanup
     /// # std::fs::remove_file("annotations_test.edf").ok();
+    /// # Ok::<(), edfplus::EdfError>(())
+    /// ```
+    /// 
+    /// ## Sleep Study Example with Proper Time Management
+    /// 
+    /// ```rust
+    /// use edfplus::{EdfWriter, SignalParam};
+    /// # use std::fs;
+    /// 
+    /// let mut writer = EdfWriter::create("sleep_study.edf")?;
+    /// writer.set_patient_info("S001", "F", "15-MAR-1980", "Sleep Study")?;
+    /// 
+    /// let eeg_signal = SignalParam {
+    ///     label: "C3-A2".to_string(),
+    ///     samples_in_file: 0,
+    ///     physical_max: 100.0,
+    ///     physical_min: -100.0,
+    ///     digital_max: 32767,
+    ///     digital_min: -32768,
+    ///     samples_per_record: 100,  // 100 Hz
+    ///     physical_dimension: "uV".to_string(),
+    ///     prefilter: "0.1-35Hz".to_string(),
+    ///     transducer: "AgAgCl".to_string(),
+    /// };
+    /// writer.add_signal(eeg_signal)?;
+    /// 
+    /// // Record 30 minutes (1800 seconds) of sleep data
+    /// let recording_duration_seconds = 1800;
+    /// for second in 0..recording_duration_seconds {
+    ///     let mut samples = Vec::with_capacity(100);
+    ///     for sample_idx in 0..100 {
+    ///         let t = second as f64 + (sample_idx as f64 / 100.0);
+    ///         let eeg_value = 20.0 * (2.0 * std::f64::consts::PI * 10.0 * t).sin();
+    ///         samples.push(eeg_value);
+    ///     }
+    ///     writer.write_samples(&[samples])?;
+    /// }
+    /// 
+    /// // Now add sleep annotations - all within [0, 1800) seconds
+    /// writer.add_annotation(300.0, None, "Lights out")?;                // 5 min
+    /// writer.add_annotation(480.0, None, "Sleep onset")?;               // 8 min  
+    /// writer.add_annotation(600.0, Some(1200.0), "Stage N2")?;          // 10-30 min
+    /// writer.add_annotation(900.0, None, "Sleep spindle")?;             // 15 min
+    /// writer.add_annotation(1200.0, Some(300.0), "REM episode")?;       // 20-25 min
+    /// writer.add_annotation(1790.0, None, "Wake up")?;                  // 29:50 - still valid
+    /// 
+    /// writer.finalize()?;
+    /// 
+    /// # // Cleanup  
+    /// # std::fs::remove_file("sleep_study.edf").ok();
     /// # Ok::<(), edfplus::EdfError>(())
     /// ```
     pub fn add_annotation(&mut self, onset_seconds: f64, duration_seconds: Option<f64>, description: &str) -> Result<()> {
@@ -1079,19 +1311,19 @@ impl EdfWriter {
         for annotation in record_annotations {
             let annotation_time = annotation.onset as f64 / EDFLIB_TIME_DIMENSION as f64;
             
-            // 计算所需空间（保守估计）
+            // 计算基本注释结构所需的最小空间
             let time_str = format!("{:.7}", annotation_time).trim_end_matches('0').trim_end_matches('.').to_string();
-            let mut needed_space = 1 + time_str.len() + 2 + annotation.description.len() + 1; // +, time, \x14, description, \x14
+            let mut min_needed_space = 1 + time_str.len() + 2 + 1; // +, time, \x14, \x14 (不包括描述)
             
             if annotation.duration >= 0 {
                 let duration_str = format!("{:.7}", annotation.duration as f64 / EDFLIB_TIME_DIMENSION as f64)
                     .trim_end_matches('0').trim_end_matches('.').to_string();
-                needed_space += 1 + duration_str.len(); // \x15 + duration
+                min_needed_space += 1 + duration_str.len(); // \x15 + duration
             }
             
-            // 检查空间限制（预留5字节缓冲）
-            if tal_data.len() + needed_space > EDFLIB_ANNOTATION_BYTES - 5 {
-                break; // 没有足够空间，跳过剩余注释
+            // 检查是否有足够的最小空间来容纳注释结构（描述可以被截断）
+            if tal_data.len() + min_needed_space > EDFLIB_ANNOTATION_BYTES - 2 {
+                break; // 没有足够空间放入基本结构，跳过剩余注释
             }
             
             // 格式: "+<onset>[\x15<duration>]\x14<description>\x14"
