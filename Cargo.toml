@@ -24,7 +24,7 @@ exclude = [
 # 包含 examples（推荐！）
 include = [
     "src/**/*",
-    "examples/**/*",
+    "examples/*",
     "tests/**/*",
     "Cargo.toml",
     "Cargo.lock",
