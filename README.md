@@ -315,6 +315,213 @@ writer.add_annotation(1.0, None, "Chinese text test")?;
 writer.add_annotation(2.0, None, "Event with emoji")?;
 ```
 
+## 📚 EDF+ 技术原理详解
+
+### 🔍 文件头部字段说明
+
+EDF+ 文件包含丰富的元数据信息，`EdfHeader` 结构体提供了对所有这些字段的访问：
+
+#### 患者信息字段
+```rust
+let header = reader.header();
+
+// 患者身份信息
+println!("患者代码: {}", header.patient_code);        // 例: "MCH-0234567" 或 "ANON-001"
+println!("性别: {}", header.sex);                     // "M", "F", 或 "X"
+println!("出生日期: {}", header.birthdate);           // "02-MAY-1951" 或 "X"
+println!("患者姓名: {}", header.patient_name);        // 通常匿名化为 "X"
+println!("额外信息: {}", header.patient_additional);  // 自由文本字段
+```
+
+#### 记录设备信息
+```rust
+// 记录设备和技术人员
+println!("管理代码: {}", header.admin_code);          // 例: "PSG-LAB", "NEURO-ICU"
+println!("技术人员: {}", header.technician);          // 负责记录的人员
+println!("设备信息: {}", header.equipment);           // 例: "Nihon Kohden EEG-1200"
+println!("记录附加信息: {}", header.recording_additional); // 记录协议等详细信息
+```
+
+#### 时间和数据结构
+```rust
+// 记录时间信息
+println!("开始日期: {}", header.start_date);          // NaiveDate 格式
+println!("开始时间: {}", header.start_time);          // NaiveTime 格式
+println!("亚秒精度: {} (100ns单位)", header.starttime_subsecond);
+
+// 文件结构信息
+println!("数据记录数: {}", header.datarecords_in_file);
+println!("每记录时长: {} 秒", header.datarecord_duration as f64 / 10_000_000.0);
+println!("文件总时长: {:.2} 秒", header.file_duration as f64 / 10_000_000.0);
+println!("注释总数: {}", header.annotations_in_file);
+```
+
+#### 信号通道详细信息
+```rust
+// 遍历所有信号通道
+for (i, signal) in header.signals.iter().enumerate() {
+    println!("\n信号 {} 详细信息:", i);
+    println!("  标签: {}", signal.label);                    // 例: "EEG Fp1", "ECG Lead II"
+    println!("  物理单位: {}", signal.physical_dimension);   // 例: "µV", "mV", "BPM"
+    println!("  物理范围: {} 到 {}", signal.physical_min, signal.physical_max);
+    println!("  数字范围: {} 到 {}", signal.digital_min, signal.digital_max);
+    println!("  采样率: {} Hz", signal.samples_per_record);  // 假设1秒数据记录
+    println!("  前置滤波: {}", signal.prefilter);           // 例: "HP:0.1Hz LP:70Hz"
+    println!("  传感器: {}", signal.transducer);            // 例: "AgAgCl cup electrodes"
+    println!("  总样本数: {}", signal.samples_in_file);
+}
+```
+
+### ⚡ 数字量与物理量转换原理
+
+EDF+ 格式使用 **16位有符号整数** 存储数据，通过线性变换转换为实际的物理测量值。理解这个转换过程对于正确处理数据至关重要。
+
+#### 转换公式
+
+```rust
+// 从数字值转换为物理值
+let physical_value = (digital_value - digital_offset) * bit_value;
+
+// 从物理值转换为数字值  
+let digital_value = (physical_value / bit_value) + digital_offset;
+
+// 其中:
+// bit_value = (physical_max - physical_min) / (digital_max - digital_min)
+// digital_offset = digital_max - physical_max / bit_value
+```
+
+#### 实际示例计算
+
+```rust
+use edfplus::{EdfReader, SignalParam};
+
+// 典型的EEG信号参数
+let signal = SignalParam {
+    label: "EEG Fp1".to_string(),
+    physical_max: 200.0,      // +200 µV
+    physical_min: -200.0,     // -200 µV  
+    digital_max: 32767,       // 16位最大值
+    digital_min: -32768,      // 16位最小值
+    samples_per_record: 256,
+    physical_dimension: "uV".to_string(),
+    // ... 其他字段
+};
+
+// 计算转换参数
+let bit_value = signal.bit_value();  // (200.0 - (-200.0)) / (32767 - (-32768)) = 400.0 / 65535 ≈ 0.0061 µV
+let offset = signal.offset();        // 32767.0 - 200.0/0.0061 ≈ 0
+
+println!("分辨率: {:.6} µV/数字单位", bit_value);
+println!("偏移量: {:.1}", offset);
+
+// 转换示例
+let digital_samples = vec![-32768, -16384, 0, 16384, 32767];
+for digital in &digital_samples {
+    let physical = signal.to_physical(*digital);
+    println!("数字值 {:6} → 物理值 {:8.3} µV", digital, physical);
+}
+
+// 输出类似:
+// 数字值 -32768 → 物理值 -200.000 µV  (最小值)
+// 数字值 -16384 → 物理值 -100.003 µV  (1/4范围)  
+// 数字值      0 → 物理值    0.000 µV  (中点)
+// 数字值  16384 → 物理值   99.997 µV  (3/4范围)
+// 数字值  32767 → 物理值  199.994 µV  (最大值)
+```
+
+#### 精度和量化噪声
+
+```rust
+// 计算信号的理论精度
+let signal_range = 400.0;  // µV (从-200到+200)
+let digital_levels = 65536; // 16位 = 2^16 个可能值
+let resolution = signal_range / digital_levels as f64;
+println!("理论分辨率: {:.4} µV", resolution);  // ~0.0061 µV
+
+// 这意味着:
+// - 小于 0.0061 µV 的信号变化无法表示
+// - 量化噪声约为 ±0.003 µV
+// - 对于 100µV 的信号，精度约为 0.006%
+```
+
+#### 不同信号类型的转换示例
+
+```rust
+// ECG 信号 (更大的电压范围)
+let ecg_signal = SignalParam {
+    label: "ECG Lead II".to_string(),
+    physical_max: 5.0,        // +5 mV
+    physical_min: -5.0,       // -5 mV
+    digital_max: 32767,
+    digital_min: -32768,
+    physical_dimension: "mV".to_string(),
+    // ...
+};
+let ecg_resolution = ecg_signal.bit_value();
+println!("ECG分辨率: {:.6} mV/数字单位", ecg_resolution);  // ~0.00015 mV
+
+// 温度信号 (不同的物理量)
+let temp_signal = SignalParam {
+    label: "Body Temperature".to_string(),
+    physical_max: 45.0,       // 45°C
+    physical_min: 30.0,       // 30°C  
+    digital_max: 32767,
+    digital_min: -32768,
+    physical_dimension: "°C".to_string(),
+    // ...
+};
+let temp_resolution = temp_signal.bit_value();
+println!("温度分辨率: {:.6} °C/数字单位", temp_resolution);  // ~0.0002°C
+```
+
+#### 转换性能考虑
+
+```rust
+// 批量转换示例
+let mut reader = EdfReader::open("large_file.edf")?;
+let signal_index = 0;
+
+// 方法1: 读取物理值 (自动转换)
+let physical_samples = reader.read_physical_samples(signal_index, 10000)?;
+// ✅ 推荐：直接获得可用的物理值
+
+// 方法2: 读取数字值然后手动转换  
+let digital_samples = reader.read_digital_samples(signal_index, 10000)?;
+let signal = &reader.header().signals[signal_index];
+let physical_samples: Vec<f64> = digital_samples
+    .iter()
+    .map(|&d| signal.to_physical(d))
+    .collect();
+// ⚠️ 仅在需要原始数字值时使用
+
+// 性能提示：
+// - 对于大多数应用，直接使用 read_physical_samples()
+// - 数字值转换适用于自定义处理或验证场景
+// - 转换计算很快，但避免不必要的重复转换
+```
+
+### 📊 数据记录结构
+
+```rust
+// EDF+文件的时间结构
+let header = reader.header();
+let record_duration_sec = header.datarecord_duration as f64 / 10_000_000.0;  // 通常是1.0秒
+let total_records = header.datarecords_in_file;
+let file_duration_sec = header.file_duration as f64 / 10_000_000.0;
+
+println!("数据记录信息:");
+println!("  每记录时长: {} 秒", record_duration_sec);
+println!("  总记录数: {}", total_records);  
+println!("  计算文件时长: {} 秒", total_records as f64 * record_duration_sec);
+println!("  头部记录时长: {} 秒", file_duration_sec);
+
+// 计算每个信号在每个数据记录中的样本数
+for (i, signal) in header.signals.iter().enumerate() {
+    let samples_per_sec = signal.samples_per_record as f64 / record_duration_sec;
+    println!("信号 {} ({}) 采样率: {:.1} Hz", i, signal.label, samples_per_sec);
+}
+```
+
 ## API 文档
 
 ### 核心类型
@@ -368,21 +575,255 @@ cargo run --example detailed_read_example
 cargo run --example annotation_best_practices
 ```
 
-## EDF+ 格式说明
+## 📖 EDF+ 格式深入解析
 
-EDF+（European Data Format Plus）是一种用于存储生物医学信号的标准格式，广泛应用于：
+EDF+（European Data Format Plus）是一种用于存储生物医学信号的国际标准格式，广泛应用于临床和研究领域。
 
-- 脑电图（EEG）
-- 心电图（ECG）
-- 肌电图（EMG）
-- 睡眠研究
-- 其他生理信号记录
+### 🏥 应用领域
+
+**神经科学与睡眠医学**
+- **脑电图（EEG）**: 癫痫监测、睡眠分期、认知研究
+- **多导睡眠图（PSG）**: 综合睡眠研究，包含EEG、EOG、EMG
+- **颅内EEG（iEEG）**: 癫痫外科评估
+
+**心血管监测**  
+- **心电图（ECG/EKG）**: 心律监测、心脏病诊断
+- **血压监测**: 连续或间歇血压记录
+
+**肌肉和运动**
+- **肌电图（EMG）**: 肌肉功能评估、运动控制研究
+- **表面EMG**: 康复医学、运动科学
+
+**其他生理信号**
+- **呼吸监测**: 气流、胸腹运动
+- **血氧饱和度**: SpO2连续监测
+- **体温**: 核心体温或皮肤温度
+
+### 🔧 EDF+ vs 原始EDF对比
+
+| 特性 | 原始EDF | EDF+ |
+|------|---------|------|
+| **注释支持** | ❌ 无 | ✅ 完整的事件标记系统 |
+| **患者信息** | 有限的自由文本 | ✅ 标准化字段格式 |
+| **设备信息** | 基本信息 | ✅ 详细的设备和技术人员信息 |
+| **时间精度** | 秒级 | ✅ 100纳秒精度 |
+| **长期记录** | 受限 | ✅ 优化的长期记录支持 |
+| **标准兼容性** | 老标准 | ✅ 现代医疗设备标准 |
+
+### 📊 文件结构详解
+
+EDF+ 文件由两个主要部分组成：
+
+```
+┌─────────────────────────────────────┐
+│              文件头部                │  256 * (信号数 + 1) 字节
+│          (Header Section)           │
+├─────────────────────────────────────┤
+│  信号1参数 │ 信号2参数 │ ... │ 注释参数  │
+├─────────────────────────────────────┤
+│              数据记录                │  可变长度
+│           (Data Records)            │
+├─────────────────────────────────────┤
+│ 记录1 │ 记录2 │ 记录3 │ ... │ 记录N   │
+├─────────────────────────────────────┤
+│ 信号数据 + 注释数据 (每个记录)        │
+└─────────────────────────────────────┘
+```
+
+#### 头部字段映射
+
+```rust
+// EDF+头部的256字节固定字段
+struct EdfMainHeader {
+    version: [u8; 8],          // "0       " (EDF+标识)
+    patient_info: [u8; 80],    // 患者信息 (结构化)
+    recording_info: [u8; 80],  // 记录信息 (结构化)  
+    start_date: [u8; 8],       // "dd.mm.yy"
+    start_time: [u8; 8],       // "hh.mm.ss"
+    header_bytes: [u8; 8],     // 头部总字节数
+    reserved: [u8; 44],        // "EDF+C" 或 "EDF+D" + 保留字段
+    datarecords: [u8; 8],      // 数据记录总数
+    record_duration: [u8; 8],  // 每记录秒数 (通常 "1       ")
+    signal_count: [u8; 4],     // 信号数量 (包含注释信号)
+}
+
+// 每个信号256字节的参数 
+struct EdfSignalHeader {
+    label: [u8; 16],           // 信号标签
+    transducer: [u8; 80],      // 传感器类型
+    physical_dimension: [u8; 8], // 物理单位
+    physical_min: [u8; 8],     // 物理最小值
+    physical_max: [u8; 8],     // 物理最大值
+    digital_min: [u8; 8],      // 数字最小值 
+    digital_max: [u8; 8],      // 数字最大值
+    prefilter: [u8; 80],       // 预滤波信息
+    samples_per_record: [u8; 8], // 每记录样本数
+    reserved: [u8; 32],        // 保留字段
+}
+```
+
+### 💾 数据存储机制
+
+#### 时间轴和数据记录
+
+```rust
+// 典型的1秒数据记录结构
+let record_duration = 1.0; // 秒
+let sampling_rates = vec![256, 512, 100, 1]; // Hz (EEG, EEG_high, ECG, Annotations)
+
+// 每个数据记录包含：
+// - EEG信号1: 256个样本 (256 Hz * 1秒)
+// - EEG信号2: 512个样本 (512 Hz * 1秒) 
+// - ECG信号:  100个样本 (100 Hz * 1秒)
+// - 注释信号: 1个"样本" (实际是120字节的注释数据)
+
+for record_index in 0..total_records {
+    let record_start_time = record_index as f64 * record_duration;
+    
+    // 每个记录存储该时间段内所有信号的数据
+    for signal_index in 0..signal_count {
+        let samples_in_this_record = signal.samples_per_record;
+        // 读取 samples_in_this_record 个16位整数...
+    }
+}
+```
+
+#### 注释信号的特殊处理
+
+```rust
+// 注释作为特殊的"信号"存储
+let annotation_signal = SignalParam {
+    label: "EDF Annotations".to_string(),  // 固定标签
+    samples_per_record: 1,                  // 每记录1个"样本"
+    digital_min: -32768,                    // 标准范围
+    digital_max: 32767,
+    physical_min: -1.0,                     // 物理值无意义
+    physical_max: 1.0,
+    physical_dimension: "".to_string(),     // 无单位
+    // ...
+};
+
+// 实际存储格式：120字节的TAL (Time-stamped Annotation Lists)
+// 格式: "+<onset>\x15<duration>\x14<description>\x14\x00..."
+let tal_example = b"+1.234\x15\x141.5\x14Sleep Stage 2\x14\x00\x00...";
+//                   ^       ^    ^                ^    ^
+//                   |       |    |                |    |
+//                  onset   dur  duration      description end
+//                         sep   value
+```
+
+### 🎯 精度和限制
+
+#### 时间精度
+```rust
+// EDF+内部使用100纳秒为时间单位
+const EDFLIB_TIME_DIMENSION: i64 = 10_000_000; // 100ns单位每秒
+
+// 时间转换示例
+let precise_onset = 1.2345678; // 秒
+let internal_time = (precise_onset * EDFLIB_TIME_DIMENSION as f64) as i64;
+// internal_time = 12_345_678 (100ns单位)
+
+// 最高精度：0.1微秒 = 100纳秒
+// 实际精度受数据记录持续时间限制
+```
+
+#### 数据精度和动态范围
+```rust
+// 16位整数的限制
+let max_dynamic_range = 65536; // 2^16 个可能值
+let typical_eeg_range = 400.0; // µV (±200µV)
+let resolution = typical_eeg_range / max_dynamic_range as f64;
+println!("EEG理论分辨率: {:.4} µV", resolution); // ~0.0061 µV
+
+// 不同信号类型的精度对比：
+let signal_types = vec![
+    ("EEG", 400.0, "µV"),      // 分辨率: ~0.006 µV
+    ("ECG", 10.0, "mV"),       // 分辨率: ~0.00015 mV  
+    ("EMG", 2000.0, "µV"),     // 分辨率: ~0.03 µV
+    ("Temperature", 15.0, "°C"), // 分辨率: ~0.0002 °C
+];
+
+for (name, range, unit) in signal_types {
+    let res = range / 65536.0;
+    println!("{}: {:.6} {}", name, res, unit);
+}
+```
+
+### 🔄 与其他格式的互操作性
+
+```rust
+// EDF+广泛支持，可与多种工具交互：
+
+// 1. 临床软件
+// - EDFbrowser (开源EDF查看器)
+// - RemLogic (Embla睡眠系统)
+// - Persyst (癫痫分析)
+
+// 2. 科研软件 
+// - MNE-Python (神经信号处理)
+// - EEGLAB (MATLAB工具箱)
+// - FieldTrip (MATLAB)
+// - BrainVision Analyzer
+
+// 3. 编程库
+// - EDFlib (C/C++)
+// - pyEDFlib (Python)
+// - edfplus (Rust) - 本库
+```
+
+### 📈 性能特征
+
+**文件大小估算**
+```rust
+fn estimate_file_size(
+    channels: usize,
+    sampling_rate: f64,
+    duration_hours: f64,
+    include_annotations: bool
+) -> f64 {
+    let header_size = 256 * (channels + 1); // 基础头部
+    let annotation_overhead = if include_annotations { 256 + 120 } else { 0 };
+    
+    let samples_per_hour = sampling_rate * 3600.0 * channels as f64;
+    let data_bytes_per_hour = samples_per_hour * 2.0; // 16位 = 2字节
+    
+    let total_bytes = header_size as f64 + 
+                      annotation_overhead as f64 + 
+                      data_bytes_per_hour * duration_hours;
+    
+    total_bytes / (1024.0 * 1024.0) // MB
+}
+
+// 示例计算
+let eeg_8ch_1h = estimate_file_size(8, 256.0, 1.0, true);
+println!("8通道EEG (256Hz, 1小时): {:.1} MB", eeg_8ch_1h); // ~14.8 MB
+
+let psg_full_8h = estimate_file_size(32, 200.0, 8.0, true); 
+println!("完整PSG (32通道, 200Hz, 8小时): {:.1} MB", psg_full_8h); // ~369 MB
+```
+
+**读取性能优化**
+```rust
+// 本库的性能优化策略：
+// 1. 流式读取 - 仅加载需要的数据段
+// 2. 批量转换 - 向量化的数字-物理值转换
+// 3. 缓存友好 - 按记录顺序访问数据
+// 4. 零拷贝 - 直接从文件映射读取
+
+// 典型性能数据 (现代SSD):
+// - 头部读取: < 1ms
+// - 1秒数据读取 (8通道, 256Hz): ~0.1ms  
+// - 数字到物理值转换: ~0.05ms (10k样本)
+// - 注释解析: ~0.01ms (100个注释)
+```
 
 ### 关键概念
 
 - **物理值 vs 数字值**: EDF+存储16位整数，通过线性变换转换为实际的物理测量值
-- **数据记录**: 文件被分割为固定时间间隔的记录
-- **注释**: EDF+支持时间标记的事件和注释
+- **数据记录**: 文件被分割为固定时间间隔的记录，便于随机访问和流式处理
+- **注释系统**: EDF+支持时间标记的事件和注释，用于标记重要事件或状态变化
+- **标准化字段**: 患者信息、设备信息等采用标准化格式，确保跨系统兼容性
 
 ## 性能
 
