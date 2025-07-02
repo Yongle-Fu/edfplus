@@ -3,8 +3,7 @@
 一个纯Rust实现的EDF+（欧洲数据格式增强版）文件读写库，专注于提供安全、高效的API。
 
 [![Crates.io](https://img.shields.io/crates/v/edfplus.svg)](https://crates.io/crates/edfplus)
-[![Documentation](https://docs.rs/edfplus/badge.svg)](https://2986002971.github.io/edfplus/edfplus/)
-[![GitHub Actions](https://github.com/2986002971/edfplus/workflows/CI/badge.svg)](https://github.com/2986002971/edfplus/actions)
+[![Documentation](https://img.shields.io/badge/docs-latest-blue.svg)](https://2986002971.github.io/edfplus/edfplus/)
 
 ## 📖 完整文档
 

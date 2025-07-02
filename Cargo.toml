@@ -2,7 +2,15 @@
 name = "edfplus"
 version = "0.1.0"
 edition = "2021"
+authors = ["Horned_Axe <horned_axe@proton.me>"]
+description = "A pure Rust implementation of EDF+ file format reader/writer"
 license = "BSD-3-Clause"
+repository = "https://github.com/2986002971/edfplus"
+homepage = "https://github.com/2986002971/edfplus"
+documentation = "https://2986002971.github.io/edfplus/edfplus/"
+keywords = ["edf", "signal-processing", "eeg", "medical", "biosignal"]
+categories = ["science", "parser-implementations"]
+readme = "README.md"
 
 [dependencies]
 thiserror = "1.0"
