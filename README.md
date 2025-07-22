@@ -1,89 +1,90 @@
+> [中文说明请点击这里 (README.zh-CN.md)](README.zh-CN.md)
+
 # EDF+ Library for Rust
 
-一个纯Rust实现的EDF+（欧洲数据格式增强版）文件读写库，专注于提供安全、高效的API。
+A pure Rust implementation of the EDF+ (European Data Format Plus) file read/write library, focused on providing a safe and efficient API.
 
 [![Crates.io](https://img.shields.io/crates/v/edfplus.svg)](https://crates.io/crates/edfplus)
 [![Documentation](https://img.shields.io/badge/docs-latest-blue.svg)](https://2986002971.github.io/edfplus/edfplus/)
 
-## 📖 完整文档
+## 📖 Full Documentation
 
-**[👉 点击查看完整API文档和教程](https://2986002971.github.io/edfplus/edfplus/)**
+**[👉 Click to view the complete API documentation and tutorials](https://2986002971.github.io/edfplus/edfplus/)**
 
-文档包含：
-- 🚀 快速开始指南
-- 📚 详细API参考
-- 💡 最佳实践和常见陷阱
-- 🧪 经过编译验证的代码示例
-- 🔧 高级用法和性能优化
+The documentation includes:
+- 🚀 Quick Start Guide
+- 📚 Detailed API Reference
+- 💡 Best Practices and Common Pitfalls
+- 🧪 Compilable Code Examples
+- 🔧 Advanced Usage and Performance Optimization
 
-## 快速预览
+## Quick Preview
 
 ```rust
 use edfplus::{EdfReader, EdfWriter, SignalParam};
 
-// 读取EDF+文件
+// Read an EDF+ file
 let mut reader = EdfReader::open("data.edf")?;
 let samples = reader.read_physical_samples(0, 1000)?;
 
-// 创建EDF+文件
+// Create an EDF+ file
 let mut writer = EdfWriter::create("output.edf")?;
 writer.add_signal(SignalParam::new_eeg("EEG Fp1", 256))?;
 writer.write_samples(&[samples])?;
 writer.finalize()?;
 ```
-- 使用reader查看文件的详细写法请参考[EdfReader](https://2986002971.github.io/edfplus/edfplus/reader/struct.EdfReader.html)
-- 使用writer写入文件的详细写法请参考[EdfWriter](https://2986002971.github.io/edfplus/edfplus/writer/struct.EdfWriter.html)
-- 写入注释（事件标记）请参考[add_annotation](https://2986002971.github.io/edfplus/edfplus/writer/struct.EdfWriter.html#method.add_annotation)
-- 常用的写入样本方法与其限制请参考[write_samples](https://2986002971.github.io/edfplus/edfplus/writer/struct.EdfWriter.html#method.write_samples)
+- For detailed usage of `reader`, see [EdfReader](https://2986002971.github.io/edfplus/edfplus/reader/struct.EdfReader.html)
+- For detailed usage of `writer`, see [EdfWriter](https://2986002971.github.io/edfplus/edfplus/writer/struct.EdfWriter.html)
+- For writing annotations (event markers), see [add_annotation](https://2986002971.github.io/edfplus/edfplus/writer/struct.EdfWriter.html#method.add_annotation)
+- For common sample writing methods and their limitations, see [write_samples](https://2986002971.github.io/edfplus/edfplus/writer/struct.EdfWriter.html#method.write_samples)
 
-## 安装
+## Installation
 
 ```toml
 [dependencies]
 edfplus = "0.1.0"
 ```
 
-## 特性
+## Features
 
-- ✅ 完整的EDF+读写支持
-- ✅ 类型安全的API设计  
-- ✅ 内存高效的流式处理
-- ✅ 丰富的元数据支持
-- ✅ 时间精确的注释系统
+- ✅ Full EDF+ read/write support
+- ✅ Type-safe API design
+- ✅ Memory-efficient streaming
+- ✅ Rich metadata support
+- ✅ Time-accurate annotation system
 
-## 示例
+## Examples
 
-查看 [`examples/`](examples/) 目录：
+See the [`examples/`](examples/) directory:
 
 ```bash
-# 生成测试文件
+# Generate a test file
 cargo run --example generate_test_file
 
-# 基本读取示例
+# Basic reading example
 cargo run --example basic_example
 
-# 注释使用最佳实践
+# Best practices for annotations
 cargo run --example annotation_best_practices
 ```
 
-## ⚠️ 重要提醒
+## ⚠️ Important Notes
 
-- **注释限制**: 描述最多40字符，且必须在数据时间范围内，具体限制请参考[add_annotation](https://2986002971.github.io/edfplus/edfplus/writer/struct.EdfWriter.html#method.add_annotation)
-- **写入限制**: 不支持回溯修改已写入的数据，原因请参考[write_samples](https://2986002971.github.io/edfplus/edfplus/writer/struct.EdfWriter.html#method.write_samples)
+- **Annotation Limitations**: Descriptions are limited to 40 characters and must be within the data time range. For details, see [add_annotation](https://2986002971.github.io/edfplus/edfplus/writer/struct.EdfWriter.html#method.add_annotation)
+- **Write Limitations**: Backtracking to modify already written data is not supported. For details, see [write_samples](https://2986002971.github.io/edfplus/edfplus/writer/struct.EdfWriter.html#method.write_samples)
 
+## License
 
-## 许可证
+This project is licensed under BSD-3-Clause.
 
-本项目采用 BSD-3-Clause 许可证。
+## Contributing
 
-## 贡献
+Issues and pull requests are welcome!
 
-欢迎提交issue和pull request！
+## Acknowledgements
 
-## 致谢
-
-本库参考了原始的[EDFlib](https://gitlab.com/Teuniz/EDFlib) C库的设计思想，但采用了现代Rust的最佳实践重新实现。
+This library is inspired by the original [EDFlib](https://gitlab.com/Teuniz/EDFlib) C library, but reimplemented with modern Rust best practices.
 
 ---
 
-**💡 提示**: 本README仅提供快速概览。完整的使用指南、API文档和最佳实践请访问[在线文档](https://2986002971.github.io/edfplus/edfplus/)。
+**💡 Tip**: This README provides only a quick overview. For the complete usage guide, API documentation, and best practices, please visit the [online documentation](https://2986002971.github.io/edfplus/edfplus/)
