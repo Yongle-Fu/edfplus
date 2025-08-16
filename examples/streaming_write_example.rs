@@ -132,7 +132,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("EMG 前10个样本: {:?}", &emg_samples[..10.min(emg_samples.len())]);
     
     // 清理测试文件
-    std::fs::remove_file("streaming_test.edf").ok();
+    // std::fs::remove_file("streaming_test.edf").ok();
     
     println!("\n🎉 流式写入测试完成！所有功能正常工作。");
     
